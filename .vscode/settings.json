@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "*.ejs": "html",
+        "log.h": "c",
+        "mesh.h": "c"
+    }
+}

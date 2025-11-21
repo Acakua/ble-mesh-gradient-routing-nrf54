@@ -7,7 +7,7 @@ Sample description
    :local:
    :depth: 2
 
-The Bluetooth® Mesh chat sample demonstrates how the mesh network can be used to facilitate communication between nodes by text, using the :ref:`bt_mesh_chat_client_model`.
+The Bluetooth® Mesh chat sample demonstrates how the mesh network can be used to facilitate communication between nodes by text, using the :ref:`bt_mesh_gradient_server_model`.
 
 Requirements
 ************
@@ -57,7 +57,7 @@ The following table shows the Bluetooth Mesh chat composition data for this samp
 
 The models are used for the following purposes:
 
-* The :ref:`bt_mesh_chat_client_model` instance in the first element is used to communicate with the other Chat Client models instantiated on the other mesh nodes.
+* The :ref:`bt_mesh_gradient_server_model` instance in the first element is used to communicate with the other Chat Client models instantiated on the other mesh nodes.
 * Config Server allows configurator devices to configure the node remotely.
 * Health Server provides ``attention`` callbacks that are used during provisioning to call your attention to the device.
   These callbacks trigger blinking of the LEDs.
@@ -88,7 +88,7 @@ Source file setup
 This sample is split into the following source files:
 
 * A :file:`main.c` file to handle initialization.
-* A file for handling the Chat Client model, :file:`chat_cli.c`.
+* A file for handling the Chat Client model, :file:`gradient_srv.c`.
 * A file for handling Bluetooth Mesh models and communication with the :ref:`shell module <shell_api>`, :file:`model_handler.c`.
 
 FEM support

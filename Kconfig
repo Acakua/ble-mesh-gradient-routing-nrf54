@@ -8,7 +8,17 @@ source "Kconfig.zephyr"
 
 menu "Nordic Bluetooth Mesh chat client sample"
 
-config BT_MESH_CHAT_CLI_MESSAGE_LENGTH
+config BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE
+    int "Forwarding table size"
+    default 3
+    range 1 255
+    help
+      Maximum number of entries in the forwarding table.
+      Each entry contains address, RSSI, and gradient information
+      for routing decisions. Larger values provide more routing
+      options but consume more memory.
+
+config BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH
 	int "Max length of the message to be sent over mesh"
 	default 90
 	range 0 255
@@ -26,8 +36,16 @@ config BT_MESH_CHAT_SAMPLE_PRESENCE_CACHE_SIZE
 	  Presence cache stores previously received presence of chat clients.
 	  Recommended to be as big as number of chat clients in the mesh network.
 
+config BT_MESH_GRADIENT_SINK_NODE
+    bool "Configure this node as sink node"
+    default n
+    help
+      If enabled, this node will be configured as the sink node
+      (gradient = 0) in the gradient routing protocol.
+      Only ONE node in the network should have this enabled.
+
 endmenu
 
-module = BT_MESH_CHAT_CLI
+module = bt_mesh_gradient_srv
 module-str = BT Mesh Chat Client model
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"

@@ -12,6 +12,6 @@ project(gradient_srv)
 target_sources(app PRIVATE
 	src/main.c
 	src/model_handler.c
-	src/chat_cli.c)
+	src/gradient_srv.c)
 target_include_directories(app PRIVATE include)
 # NORDIC SDK APP END

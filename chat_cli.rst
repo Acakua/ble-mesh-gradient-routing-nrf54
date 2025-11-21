@@ -1,4 +1,4 @@
-.. _bt_mesh_chat_client_model:
+.. _bt_mesh_gradient_server_model:
 
 Chat Client model
 #################
@@ -19,7 +19,7 @@ In this section, you can find more detailed information about the following aspe
 * `Composition data structure`_
 * `Messages`_
 
-.. _bt_mesh_chat_client_model_composition:
+.. _bt_mesh_gradient_server_model_composition:
 
 Composition data structure
 ==========================
@@ -34,10 +34,10 @@ The Chat Client model is a vendor model, and therefore in the application, when 
                 BT_MESH_MODEL_CFG_SRV(&cfg_srv),
                 BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub)),
             BT_MESH_MODEL_LIST(
-                BT_MESH_MODEL_CHAT_CLI(&chat))),
+                BT_MESH_MODEL_GRADIENT_SRV(&chat))),
     };
 
-.. _bt_mesh_chat_client_model_messages:
+.. _bt_mesh_gradient_server_model_messages:
 
 Messages
 ========
@@ -57,13 +57,13 @@ Presence Get
 Message
    Used to send a non-private text message.
    The payload consists of the text string terminated by ``\0``.
-   The length of the text string can be configured at the compile-time using :ref:`CONFIG_BT_MESH_CHAT_CLI_MESSAGE_LENGTH <CONFIG_BT_MESH_CHAT_CLI_MESSAGE_LENGTH>` option.
+   The length of the text string can be configured at the compile-time using :ref:`CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH <CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH>` option.
 
 Private Message
    Used to send a private text message.
    When the model receives this message, it replies with the Message Reply.
    The payload consists of the text string terminated by ``\0``.
-   The length of the text string can be configured at the compile-time using :ref:`CONFIG_BT_MESH_CHAT_CLI_MESSAGE_LENGTH <CONFIG_BT_MESH_CHAT_CLI_MESSAGE_LENGTH>` option.
+   The length of the text string can be configured at the compile-time using :ref:`CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH <CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH>` option.
 
 Message Reply
    Used to reply on the received Private Message to confirm the reception.
@@ -78,26 +78,26 @@ Configuration options
 
 The following configuration parameters are associated with the Chat Client model:
 
-.. _CONFIG_BT_MESH_CHAT_CLI_MESSAGE_LENGTH:
+.. _CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH:
 
-CONFIG_BT_MESH_CHAT_CLI_MESSAGE_LENGTH - Message length configuration
+CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH - Message length configuration
    Maximum length of the message to be sent over the mesh network.
 
-.. _bt_mesh_chat_client_model_states:
+.. _bt_mesh_gradient_server_model_states:
 
 States
 ******
 
 The Chat Client model contains the following states:
 
-Presence: ``bt_mesh_chat_cli_presence``:
+Presence: ``bt_mesh_gradient_srv_presence``:
     The Chat Client model enables a user to set a current presence of the client instantiated on the element of the node.
     It can have the following values:
 
-    * :c:enumerator:`BT_MESH_CHAT_CLI_PRESENCE_AVAILABLE` - The client is available.
-    * :c:enumerator:`BT_MESH_CHAT_CLI_PRESENCE_AWAY` - The client is away.
-    * :c:enumerator:`BT_MESH_CHAT_CLI_PRESENCE_INACTIVE` - The client is inactive.
-    * :c:enumerator:`BT_MESH_CHAT_CLI_PRESENCE_DO_NOT_DISTURB` - The client is in "do not disturb" state.
+    * :c:enumerator:`BT_MESH_GRADIENT_SRV_PRESENCE_AVAILABLE` - The client is available.
+    * :c:enumerator:`BT_MESH_GRADIENT_SRV_PRESENCE_AWAY` - The client is away.
+    * :c:enumerator:`BT_MESH_GRADIENT_SRV_PRESENCE_INACTIVE` - The client is inactive.
+    * :c:enumerator:`BT_MESH_GRADIENT_SRV_PRESENCE_DO_NOT_DISTURB` - The client is in "do not disturb" state.
 
 Extended models
 ***************
