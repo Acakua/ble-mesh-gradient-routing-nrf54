@@ -1,9 +1,3 @@
-/*
- * Copyright (c) 2019 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
- */
-
 #include <zephyr/bluetooth/mesh.h>
 #include "gradient_srv.h"
 #include "mesh/net.h"
@@ -13,11 +7,11 @@
 #include <zephyr/drivers/uart.h>
 #include <stdio.h>
 
-//Định nghĩa UART device
+/* Define UART device */
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_console)
 static const struct device *uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 
-/* Hàm helper để print qua UART */
+/* Helper function to print via UART */
 static void uart_print(const char *buf)
 {
     if (!device_is_ready(uart_dev)) {
@@ -30,7 +24,7 @@ static void uart_print(const char *buf)
     }
 }
 
-/* Macro để thay thế printk */
+/* Macro to replace printk */
 #define UART_PRINT(fmt, ...) \
     do { \
         char _buf[256]; \
@@ -38,8 +32,8 @@ static void uart_print(const char *buf)
         uart_print(_buf); \
     } while (0)
 
-// Định nghĩa chu kỳ publish gradient (milliseconds)
-#define UPDATE_GRADIENT_INTERVAL 5000  // 5 giây
+/* Define gradient publish interval (milliseconds) */
+#define UPDATE_GRADIENT_INTERVAL 5000  
 
 BUILD_ASSERT(BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT,
 				   BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE) <=
@@ -50,11 +44,11 @@ BUILD_ASSERT(BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT,
 		    BT_MESH_TX_SDU_MAX,
 	     "The message must fit inside an application SDU.");
 
-// Khai báo work item cho LED blink
+/* Work item for LED 2 blink */
 static struct k_work_delayable led2_blink_work;
 static int blink_count2 = 0;
 
-// Thêm work item cho LED2
+/* Work item for LED 1 blink */
 static struct k_work_delayable led1_blink_work;
 static int blink_count21 = 0;
 
@@ -248,7 +242,6 @@ static int bt_mesh_gradient_srv_update_handler(const struct bt_mesh_model *model
 
     bt_mesh_model_msg_init(buf, BT_MESH_GRADIENT_SRV_OP_GRADIENT);
     
-    // ✅ FIX: Dùng add thay vì push
     net_buf_simple_add_u8(buf, gradient_srv->gradient);
 
     UART_PRINT("Auto-published gradient: %d\n", gradient_srv->gradient);

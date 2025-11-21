@@ -1,16 +1,3 @@
-/*
- * Copyright (c) 2020 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
- */
-
-/**
- * @file
- * @defgroup bt_mesh_gradient_srv
- * @{
- * @brief API for the Bluetooth Mesh Chat Client model.
- */
-
 #ifndef BT_MESH_GRADIENT_SRV_H__
 #define BT_MESH_GRADIENT_SRV_H__
 
