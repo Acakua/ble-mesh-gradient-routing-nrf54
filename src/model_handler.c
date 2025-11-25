@@ -18,30 +18,6 @@
 #include "gradient_srv.h"
 #include "model_handler.h"
 
-/* UART device */
-#define UART_DEVICE_NODE DT_CHOSEN(zephyr_console)
-static const struct device *uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
-
-/* UART helper functions */
-static void uart_print(const char *buf)
-{
-    if (!device_is_ready(uart_dev)) {
-        return;
-    }
-    
-    int msg_len = strlen(buf);
-    for (int i = 0; i < msg_len; i++) {
-        uart_poll_out(uart_dev, buf[i]);
-    }
-}
-
-#define UART_PRINT(fmt, ...) \
-    do { \
-        char _buf[256]; \
-        snprintf(_buf, sizeof(_buf), fmt, ##__VA_ARGS__); \
-        uart_print(_buf); \
-    } while (0)
-
 static const struct shell *chat_shell;
 
 // Counter cho data payload
@@ -174,19 +150,19 @@ const struct bt_mesh_comp *model_handler_init(void)
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
     // Node này là sink (cấu hình qua Kconfig)
     gradient_srv.gradient = 0;
-    UART_PRINT("Initialized as SINK node (gradient = 0)\n");
+    printk("Initialized as SINK node (gradient = 0)\n");
 #else
     // Node thông thường
     gradient_srv.gradient = UINT8_MAX;
-    UART_PRINT("Initialized as regular node (gradient = 255)\n");
+    printk("Initialized as regular node (gradient = 255)\n");
 #endif
 
     // Khởi tạo buttons
     int err = dk_buttons_init(button_handler);
     if (err) {
-        UART_PRINT("Failed to initialize buttons (err %d)\n", err);
+        printk("Failed to initialize buttons (err %d)\n", err);
     } else {
-        UART_PRINT("Button 0 initialized - Press to send data to sink\n");
+        printk("Button 0 initialized - Press to send data to sink\n");
     }
 
     return &comp;
@@ -196,31 +172,31 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 {
 	// Kiểm tra nếu button 0 được nhấn 
 	if (has_changed & button_state & DK_BTN1_MSK) {
-		UART_PRINT("\n=== Button 0 Pressed ===\n");
+		printk("\n=== Button 0 Pressed ===\n");
 		
 		// Kiểm tra nếu node chưa được provision
 		if (!bt_mesh_is_provisioned()) {
-			UART_PRINT("ERROR: Node not provisioned yet\n");
+			printk("ERROR: Node not provisioned yet\n");
 			return;
 		}
 		
 		// In thông tin node hiện tại
 		uint16_t my_addr = bt_mesh_model_elem(gradient_srv.model)->rt->addr;
-		UART_PRINT("My address: 0x%04x, gradient: %d\n", 
+		printk("My address: 0x%04x, gradient: %d\n", 
 			   my_addr, gradient_srv.gradient);
 		
 		// Nếu node này là sink, không gửi data
 		if (gradient_srv.gradient == 0) {
-			UART_PRINT("This is sink node, cannot send data\n");
+			printk("This is sink node, cannot send data\n");
 			return;
 		}
 		
 		// In forwarding table
-		UART_PRINT("Forwarding table:\n");
+		printk("Forwarding table:\n");
 		bool has_route = false;
 		for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
 			if (gradient_srv.forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
-				UART_PRINT("  [%d] addr=0x%04x, gradient=%d, rssi=%d\n",
+				printk("  [%d] addr=0x%04x, gradient=%d, rssi=%d\n",
 					   i,
 					   gradient_srv.forwarding_table[i].addr,
 					   gradient_srv.forwarding_table[i].gradient,
@@ -230,7 +206,7 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 		}
 		
 		if (!has_route) {
-			UART_PRINT("ERROR: No route available, waiting for gradient messages...\n");
+			printk("ERROR: No route available, waiting for gradient messages...\n");
 			return;
 		}
 		
@@ -238,18 +214,18 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 		uint16_t dest_addr = gradient_srv.forwarding_table[0].addr;
 		data_counter++;
 		
-		UART_PRINT("Sending data %d to 0x%04x...\n", data_counter, dest_addr);
+		printk("Sending data %d to 0x%04x...\n", data_counter, dest_addr);
 		
 		int err = bt_mesh_gradient_srv_data_send(&gradient_srv, 
 												  dest_addr, 
 												  data_counter);
 		
 		if (err) {
-			UART_PRINT("ERROR: Send failed with error %d\n", err);
+			printk("ERROR: Send failed with error %d\n", err);
 		} else {
-			UART_PRINT("SUCCESS: Data %d sent to 0x%04x\n", data_counter, dest_addr);
+			printk("SUCCESS: Data %d sent to 0x%04x\n", data_counter, dest_addr);
 		}
 		
-		UART_PRINT("========================\n\n");
+		printk("========================\n\n");
 	}
 }

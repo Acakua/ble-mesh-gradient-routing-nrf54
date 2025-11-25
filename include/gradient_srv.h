@@ -15,11 +15,11 @@ extern "C" {
 /** Model ID of the Bluetooth Mesh Chat Client model. */
 #define BT_MESH_GRADIENT_SRV_VENDOR_MODEL_ID      0x000A
 
-/** Non-private message opcode. */
+/** Gradient message opcode. */
 #define BT_MESH_GRADIENT_SRV_OP_GRADIENT BT_MESH_MODEL_OP_3(0x0A, \
 				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
-/** Private message opcode. */
+/** Data message opcode. */
 #define BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE BT_MESH_MODEL_OP_3(0x0B, \
 				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 

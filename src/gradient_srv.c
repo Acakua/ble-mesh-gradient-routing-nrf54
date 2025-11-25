@@ -4,37 +4,6 @@
 #include <string.h>
 #include <dk_buttons_and_leds.h>
 
-#include <zephyr/drivers/uart.h>
-#include <stdio.h>
-
-/* Define UART device */
-#define UART_DEVICE_NODE DT_CHOSEN(zephyr_console)
-static const struct device *uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
-
-/* Helper function to print via UART */
-static void uart_print(const char *buf)
-{
-    if (!device_is_ready(uart_dev)) {
-        return;
-    }
-    
-    int msg_len = strlen(buf);
-    for (int i = 0; i < msg_len; i++) {
-        uart_poll_out(uart_dev, buf[i]);
-    }
-}
-
-/* Macro to replace printk */
-#define UART_PRINT(fmt, ...) \
-    do { \
-        char _buf[256]; \
-        snprintf(_buf, sizeof(_buf), fmt, ##__VA_ARGS__); \
-        uart_print(_buf); \
-    } while (0)
-
-/* Define gradient publish interval (milliseconds) */
-#define UPDATE_GRADIENT_INTERVAL 5000  
-
 BUILD_ASSERT(BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT,
 				   BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE) <=
 		    BT_MESH_RX_SDU_MAX,
@@ -52,11 +21,11 @@ static int blink_count2 = 0;
 static struct k_work_delayable led1_blink_work;
 static int blink_count21 = 0;
 
-// Khai báo work item cho periodic gradient publish
-static struct k_work_delayable gradient_publish_work;
-
 // Biến global để lưu gradient_srv pointer
 static struct bt_mesh_gradient_srv *g_gradient_srv = NULL;
+
+// Khai báo work item cho initial publish
+static struct k_work_delayable initial_publish_work;
 
 // Work handler để nháy LED 2
 static void led2_blink_handler(struct k_work *work)
@@ -101,26 +70,24 @@ static void led1_blink_handler(struct k_work *work)
     }
 }
 
-// Work handler để publish gradient định kỳ
-static void gradient_publish_handler(struct k_work *work)
+// Work handler cho initial publish
+static void initial_publish_handler(struct k_work *work)
 {
     if (g_gradient_srv != NULL) {
-        // Publish gradient message
         int err = bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
         
         if (err) {
-            UART_PRINT("Failed to publish gradient: %d\n", err);
+            printk("Initial publish failed: %d\n", err);
         } else {
-            UART_PRINT("Published gradient: %d\n", g_gradient_srv->gradient);
+            printk("Initial gradient published: %d\n", 
+                   g_gradient_srv->gradient);
         }
     }
-    
-    // Reschedule
-    k_work_reschedule(&gradient_publish_work, K_MSEC(UPDATE_GRADIENT_INTERVAL));
 }
 
-static int handle_gradient_mesage(const struct bt_mesh_model *model, struct bt_mesh_msg_ctx *ctx,
-              struct net_buf_simple *buf)
+static int handle_gradient_mesage(const struct bt_mesh_model *model, 
+                                   struct bt_mesh_msg_ctx *ctx,
+                                   struct net_buf_simple *buf)
 {
     struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
     uint8_t msg;
@@ -132,13 +99,14 @@ static int handle_gradient_mesage(const struct bt_mesh_model *model, struct bt_m
         return 0;
     }
 
+    // Nháy LED khi nhận gradient
     blink_count2 = 0;
     k_work_schedule(&led2_blink_work, K_NO_WAIT);
 
     msg = net_buf_simple_pull_u8(buf);
     
-    UART_PRINT("Received gradient %d from 0x%04x (RSSI: %d)\n", 
-               msg, sender_addr, rssi);
+    printk("Received gradient %d from 0x%04x (RSSI: %d)\n", 
+           msg, sender_addr, rssi);
 
     int insert_pos = -1;
         
@@ -177,10 +145,17 @@ static int handle_gradient_mesage(const struct bt_mesh_model *model, struct bt_m
         uint8_t best_parent_gradient = gradient_srv->forwarding_table[0].gradient;
             
         if (gradient_srv->gradient > best_parent_gradient + 1) {
-            gradient_srv->gradient = best_parent_gradient + 1;		
+            uint8_t old_gradient = gradient_srv->gradient;
+            gradient_srv->gradient = best_parent_gradient + 1;
+            
+            printk("Gradient updated: %d -> %d\n", 
+                   old_gradient, gradient_srv->gradient);
+            
+            // (ngoài periodic publish)
             bt_mesh_gradient_srv_gradient_send(gradient_srv);
         }
     }
+    
     return 0;
 }
 
@@ -244,7 +219,7 @@ static int bt_mesh_gradient_srv_update_handler(const struct bt_mesh_model *model
     
     net_buf_simple_add_u8(buf, gradient_srv->gradient);
 
-    UART_PRINT("Auto-published gradient: %d\n", gradient_srv->gradient);
+    printk("Auto-published gradient: %d\n", gradient_srv->gradient);
 
     return 0;
 }
@@ -269,23 +244,22 @@ static int bt_mesh_gradient_srv_settings_set(const struct bt_mesh_model *model,
 /* .. include_startingpoint_gradient_srv_rst_4 */
 static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model)
 {
-	struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
+    struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
 
-	gradient_srv->model = model;
+    gradient_srv->model = model;
 
 	net_buf_simple_init_with_data(&gradient_srv->pub_msg, gradient_srv->buf,
 				      sizeof(gradient_srv->buf));
 	gradient_srv->pub.msg = &gradient_srv->pub_msg;
 	gradient_srv->pub.update = bt_mesh_gradient_srv_update_handler;
 
-	// Khởi tạo LED blink work
+    // Khởi tạo LED blink work
     k_work_init_delayable(&led2_blink_work, led2_blink_handler);
 
-	// Khởi tạo LED2 blink work
     k_work_init_delayable(&led1_blink_work, led1_blink_handler);
 
-	// Khởi tạo gradient publish work
-    k_work_init_delayable(&gradient_publish_work, gradient_publish_handler);
+    /* Khởi tạo initial publish work */
+    k_work_init_delayable(&initial_publish_work, initial_publish_handler);
 
 	return 0;
 }
@@ -306,12 +280,13 @@ static int bt_mesh_gradient_srv_start(const struct bt_mesh_model *model)
     if (model->pub) {
         model->pub->addr = BT_MESH_ADDR_ALL_NODES;
         model->pub->ttl = 0;
+        model->pub->period = BT_MESH_PUB_PERIOD_SEC(5);
         
-        UART_PRINT("Auto-configured publication: addr=0x%04x\n", 
+        printk("Auto-configured publication: addr=0x%04x\n", 
                model->pub->addr);
+        
+        k_work_schedule(&initial_publish_work, K_MSEC(500));
     }
-    
-    k_work_schedule(&gradient_publish_work, K_MSEC(UPDATE_GRADIENT_INTERVAL));
     
     return 0;
 }
