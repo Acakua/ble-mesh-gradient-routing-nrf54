@@ -1,9 +1,3 @@
-/*
- * Copyright (c) 2019 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
- */
-
 #include <stdio.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
@@ -148,6 +142,7 @@ const struct bt_mesh_comp *model_handler_init(void)
     }
 
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
+	
     // Node này là sink (cấu hình qua Kconfig)
     gradient_srv.gradient = 0;
     printk("Initialized as SINK node (gradient = 0)\n");
