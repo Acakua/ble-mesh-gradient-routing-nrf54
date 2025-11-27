@@ -98,7 +98,7 @@ static void initial_publish_handler(struct k_work *work)
     }
 }
 
-// Work handler để xử lý gradient message (non-blocking)
+// Work handler để xử lý forwarding table và cập nhật gradient 
 static void gradient_process_handler(struct k_work *work)
 {
     struct gradient_context *ctx = &gradient_ctx;
@@ -115,44 +115,70 @@ static void gradient_process_handler(struct k_work *work)
     
     //Xử lý forwarding table
     int insert_pos = -1;
+    int sender_pos = -1;
         
-    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
-        if (gradient_srv->forwarding_table[i].addr == sender_addr) {
-            printk("[Process] Entry already exists at index %d\n", i);
-            break;
-        }
-
-        if (gradient_srv->forwarding_table[i].addr == BT_MESH_ADDR_UNASSIGNED) {
+    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) 
+    {
+        /** Find position to insert */
+        if (gradient_srv->forwarding_table[i].addr == BT_MESH_ADDR_UNASSIGNED) 
+        {
             insert_pos = i;
             break;
         }
 
-        if (msg < gradient_srv->forwarding_table[i].gradient) {
+        if (msg < gradient_srv->forwarding_table[i].gradient && insert_pos == -1) 
+        {
             insert_pos = i;
-            break;
         } else if (msg == gradient_srv->forwarding_table[i].gradient && 
-                   rssi > gradient_srv->forwarding_table[i].rssi) {
+                   rssi > gradient_srv->forwarding_table[i].rssi && insert_pos == -1) 
+        {
             insert_pos = i;
+        }
+
+        /** Check if sender already exists */
+        if (gradient_srv->forwarding_table[i].addr == sender_addr) {
+            sender_pos = i;
+            printk("[Process] Entry already exists at index [%d]\n", i);
             break;
         }
     }
         
     if (insert_pos != -1) {
-        // Shift entries
-        for (int i = CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE - 1; 
-             i > insert_pos; i--) {
-            gradient_srv->forwarding_table[i] = gradient_srv->forwarding_table[i - 1];
-        }
-    
-        gradient_srv->forwarding_table[insert_pos].addr = sender_addr;
-        gradient_srv->forwarding_table[insert_pos].rssi = rssi;
-        gradient_srv->forwarding_table[insert_pos].gradient = msg;
+        if (sender_pos == -1){
+            // Shift entries
+            for (int i = CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE - 1; i > insert_pos; i--) 
+            {
+                gradient_srv->forwarding_table[i] = gradient_srv->forwarding_table[i - 1];
+            }
         
-        printk("[Process] Inserted at index %d: addr=0x%04x, gradient=%d\n", 
-               insert_pos, sender_addr, msg);
+            gradient_srv->forwarding_table[insert_pos].addr = sender_addr;
+            gradient_srv->forwarding_table[insert_pos].rssi = rssi;
+            gradient_srv->forwarding_table[insert_pos].gradient = msg;
+            
+            printk("[Process] Inserted at index [%d]: addr=0x%04x, gradient=%d\n", 
+                insert_pos, sender_addr, msg);
+        }else{
+            for (int i = sender_pos; i > insert_pos; i--) 
+            {
+                gradient_srv->forwarding_table[i] = gradient_srv->forwarding_table[i - 1];
+            }
+            gradient_srv->forwarding_table[insert_pos].addr = sender_addr;
+            gradient_srv->forwarding_table[insert_pos].rssi = rssi;
+            gradient_srv->forwarding_table[insert_pos].gradient = msg;
+
+            printk("[Process] Moved entry from index [%d] to index [%d]: addr = [0x%04x], gradient = [%d]\n", 
+                sender_pos, insert_pos, sender_addr, msg);
+        }
+    }else{
+        if(sender_pos != -1){
+            gradient_srv->forwarding_table[sender_pos].rssi = rssi;
+            gradient_srv->forwarding_table[sender_pos].gradient = msg;
+            printk("[Process] Updated existing entry at index [%d]: addr = [0x%04x], gradient = [%d]\n", 
+                sender_pos, sender_addr, msg);
+        }
     }
 
-    //Cập nhật gradient
+    /* Cập nhật gradient */
     if (gradient_srv->forwarding_table[0].addr != BT_MESH_ADDR_UNASSIGNED) {
         uint8_t best_parent_gradient = gradient_srv->forwarding_table[0].gradient;
             
@@ -160,7 +186,7 @@ static void gradient_process_handler(struct k_work *work)
             uint8_t old_gradient = gradient_srv->gradient;
             gradient_srv->gradient = best_parent_gradient + 1;
             
-            printk("[Process] Gradient updated: %d -> %d\n", 
+            printk("[Process] Gradient updated: [%d] -> [%d]\n", 
                    old_gradient, gradient_srv->gradient);
             
             // Publish ngay
