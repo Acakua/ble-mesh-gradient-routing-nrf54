@@ -8,9 +8,12 @@
 #include <zephyr/shell/shell_uart.h>
 
 #include <zephyr/drivers/uart.h>
+#include <zephyr/logging/log.h>
 
 #include "gradient_srv.h"
 #include "model_handler.h"
+
+LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_DBG);
 
 static const struct shell *chat_shell;
 
@@ -145,19 +148,19 @@ const struct bt_mesh_comp *model_handler_init(void)
 	
     // Node này là sink (cấu hình qua Kconfig)
     gradient_srv.gradient = 0;
-    printk("Initialized as SINK node (gradient = 0)\n");
+    LOG_INF("Initialized as SINK node (gradient = 0)\n");
 #else
     // Node thông thường
     gradient_srv.gradient = UINT8_MAX;
-    printk("Initialized as regular node (gradient = 255)\n");
+    LOG_INF("Initialized as regular node (gradient = 255)\n");
 #endif
 
     // Khởi tạo buttons
     int err = dk_buttons_init(button_handler);
     if (err) {
-        printk("Failed to initialize buttons (err %d)\n", err);
+        LOG_INF("Failed to initialize buttons (err %d)\n", err);
     } else {
-        printk("Button 0 initialized - Press to send data to sink\n");
+        LOG_INF("Button 0 initialized - Press to send data to sink\n");
     }
 
     return &comp;
@@ -165,33 +168,33 @@ const struct bt_mesh_comp *model_handler_init(void)
 
 static void button_handler(uint32_t button_state, uint32_t has_changed)
 {
-	// Kiểm tra nếu button 0 được nhấn 
-	if (has_changed & button_state & DK_BTN1_MSK) {
-		printk("\n=== Button 0 Pressed ===\n");
-		
-		// Kiểm tra nếu node chưa được provision
+    if (has_changed & button_state & DK_BTN1_MSK) 
+    {
+        LOG_INF("\n=== Button 0 Pressed ===");
+        
+        // Kiểm tra nếu node chưa được provision
 		if (!bt_mesh_is_provisioned()) {
-			printk("ERROR: Node not provisioned yet\n");
+			LOG_INF("ERROR: Node not provisioned yet\n");
 			return;
 		}
 		
 		// In thông tin node hiện tại
 		uint16_t my_addr = bt_mesh_model_elem(gradient_srv.model)->rt->addr;
-		printk("My address: 0x%04x, gradient: %d\n", 
+		LOG_INF("My address: 0x%04x, gradient: %d\n", 
 			   my_addr, gradient_srv.gradient);
 		
 		// Nếu node này là sink, không gửi data
 		if (gradient_srv.gradient == 0) {
-			printk("This is sink node, cannot send data\n");
+			LOG_INF("This is sink node, cannot send data\n");
 			return;
 		}
 		
 		// In forwarding table
-		printk("Forwarding table:\n");
+		LOG_INF("Forwarding table:\n");
 		bool has_route = false;
 		for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
 			if (gradient_srv.forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
-				printk("  [%d] addr=0x%04x, gradient=%d, rssi=%d\n",
+				LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d\n",
 					   i,
 					   gradient_srv.forwarding_table[i].addr,
 					   gradient_srv.forwarding_table[i].gradient,
@@ -200,27 +203,21 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 			}
 		}
 		
-		if (!has_route) {
-			printk("ERROR: No route available, waiting for gradient messages...\n");
+		if (!has_route) 
+		{
+			LOG_INF("ERROR: No route available, waiting for gradient messages...\n");
 			return;
 		}
-		
-		// Gửi data đến parent tốt nhất (index 0)
-		uint16_t dest_addr = gradient_srv.forwarding_table[0].addr;
-		data_counter++;
-		
-		printk("Sending data %d to 0x%04x...\n", data_counter, dest_addr);
-		
-		int err = bt_mesh_gradient_srv_data_send(&gradient_srv, 
-												  dest_addr, 
-												  data_counter);
-		
-		if (err) {
-			printk("ERROR: Send failed with error %d\n", err);
-		} else {
-			printk("SUCCESS: Data %d sent to 0x%04x\n", data_counter, dest_addr);
-		}
-		
-		printk("========================\n\n");
-	}
+        
+        data_counter++;
+        uint16_t dest_addr = gradient_srv.forwarding_table[0].addr;
+
+        LOG_INF("Sending data %d to 0x%04x...", data_counter, dest_addr);
+
+        bt_mesh_gradient_srv_data_send(&gradient_srv,
+                                                  dest_addr,
+                                                  data_counter);
+       
+        LOG_INF("========================\n");
+    }
 }

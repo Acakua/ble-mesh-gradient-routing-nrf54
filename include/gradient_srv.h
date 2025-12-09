@@ -9,10 +9,9 @@ extern "C" {
 #endif
 
 /* .. include_startingpoint_gradient_srv_rst_1 */
-/** Company ID of the Bluetooth Mesh Chat Client model. */
 #define BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID    CONFIG_BT_COMPANY_ID_NORDIC
 
-/** Model ID of the Bluetooth Mesh Chat Client model. */
+/** Model ID of the Gradient Server model. */
 #define BT_MESH_GRADIENT_SRV_VENDOR_MODEL_ID      0x000A
 
 /** Gradient message opcode. */

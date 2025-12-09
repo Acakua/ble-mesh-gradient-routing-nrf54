@@ -3,6 +3,9 @@
 #include "mesh/net.h"
 #include <string.h>
 #include <dk_buttons_and_leds.h>
+#include <zephyr/logging/log.h>
+
+LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_DBG);
 
 BUILD_ASSERT(BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT,
 				   BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE) <=
@@ -90,9 +93,9 @@ static void initial_publish_handler(struct k_work *work)
         int err = bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
         
         if (err) {
-            printk("Initial publish failed: %d\n", err);
+            LOG_INF("Initial publish failed: %d\n", err);
         } else {
-            printk("Initial gradient published: %d\n", 
+            LOG_INF("Initial gradient published: %d\n", 
                    g_gradient_srv->gradient);
         }
     }
@@ -110,8 +113,9 @@ static void gradient_process_handler(struct k_work *work)
     if (!gradient_srv) {
         return;
     }
-    
-    printk("[Process] Gradient handling started\n");
+
+    LOG_INF("Received gradient %d from 0x%04x (RSSI: %d)\n", 
+           msg, sender_addr, rssi);
     
     //Xử lý forwarding table
     int insert_pos = -1;
@@ -138,7 +142,14 @@ static void gradient_process_handler(struct k_work *work)
         /** Check if sender already exists */
         if (gradient_srv->forwarding_table[i].addr == sender_addr) {
             sender_pos = i;
-            printk("[Process] Entry already exists at index [%d]\n", i);
+            if(sender_pos == insert_pos){
+                insert_pos = -1;
+            }
+
+            gradient_srv->forwarding_table[sender_pos].rssi = rssi;
+            gradient_srv->forwarding_table[sender_pos].gradient = msg;
+            LOG_INF("[Process] Updated existing entry at index [%d]: addr = [0x%04x], gradient = [%d]\n", 
+                sender_pos, sender_addr, msg);
             break;
         }
     }
@@ -155,7 +166,7 @@ static void gradient_process_handler(struct k_work *work)
             gradient_srv->forwarding_table[insert_pos].rssi = rssi;
             gradient_srv->forwarding_table[insert_pos].gradient = msg;
             
-            printk("[Process] Inserted at index [%d]: addr=0x%04x, gradient=%d\n", 
+            LOG_INF("[Process] Inserted at index [%d]: addr=0x%04x, gradient=%d\n", 
                 insert_pos, sender_addr, msg);
         }else{
             for (int i = sender_pos; i > insert_pos; i--) 
@@ -166,15 +177,8 @@ static void gradient_process_handler(struct k_work *work)
             gradient_srv->forwarding_table[insert_pos].rssi = rssi;
             gradient_srv->forwarding_table[insert_pos].gradient = msg;
 
-            printk("[Process] Moved entry from index [%d] to index [%d]: addr = [0x%04x], gradient = [%d]\n", 
+            LOG_INF("[Process] Moved entry from index [%d] to index [%d]: addr = [0x%04x], gradient = [%d]\n", 
                 sender_pos, insert_pos, sender_addr, msg);
-        }
-    }else{
-        if(sender_pos != -1){
-            gradient_srv->forwarding_table[sender_pos].rssi = rssi;
-            gradient_srv->forwarding_table[sender_pos].gradient = msg;
-            printk("[Process] Updated existing entry at index [%d]: addr = [0x%04x], gradient = [%d]\n", 
-                sender_pos, sender_addr, msg);
         }
     }
 
@@ -186,7 +190,7 @@ static void gradient_process_handler(struct k_work *work)
             uint8_t old_gradient = gradient_srv->gradient;
             gradient_srv->gradient = best_parent_gradient + 1;
             
-            printk("[Process] Gradient updated: [%d] -> [%d]\n", 
+            LOG_INF("[Process] Gradient updated: [%d] -> [%d]\n", 
                    old_gradient, gradient_srv->gradient);
             
             // Publish ngay
@@ -194,7 +198,7 @@ static void gradient_process_handler(struct k_work *work)
         }
     }
     
-    printk("[Process] Gradient handling completed\n");
+    LOG_INF("[Process] Gradient handling completed\n");
     gradient_ctx.gradient_srv = NULL;
 }
 
@@ -212,14 +216,19 @@ static int handle_gradient_mesage(const struct bt_mesh_model *model,
         return 0;
     }
 
+    if(rssi < -75){
+        return 0;
+    }
+
     // Nháy LED khi nhận gradient
     blink_count2 = 0;
     k_work_schedule(&led2_blink_work, K_NO_WAIT);
 
     msg = net_buf_simple_pull_u8(buf);
-    
-    printk("Received gradient %d from 0x%04x (RSSI: %d)\n", 
-           msg, sender_addr, rssi);
+
+    if(msg > gradient_srv->gradient){
+        return 0;
+    }
 
     gradient_ctx.gradient_srv = gradient_srv;
     gradient_ctx.gradient_msg = msg;
@@ -227,8 +236,6 @@ static int handle_gradient_mesage(const struct bt_mesh_model *model,
     gradient_ctx.rssi = rssi;
 
     k_work_schedule(&gradient_process_work, K_NO_WAIT);
-    
-    printk("[RX] Gradient processing scheduled\n");
     
     return 0;
 }
@@ -242,6 +249,9 @@ static int handle_data_message(const struct bt_mesh_model *model,
     
     uint16_t received_data = net_buf_simple_pull_le16(buf);
 
+    LOG_INF("Received data message %d from 0x%04x\n", 
+           received_data, ctx->addr);
+
     if (gradient_srv->gradient == 0) {
         static bool led0_state = false;
         led0_state = !led0_state;
@@ -249,17 +259,24 @@ static int handle_data_message(const struct bt_mesh_model *model,
         dk_set_led(DK_LED1, led0_state); 
         return 0;
     }else{
-		// Trigger LED2 blink (non-blocking)
 		blink_count1 = 0;
 		k_work_schedule(&led1_blink_work, K_NO_WAIT);
+        bool has_route = false;
+
 		for(int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++){
-            int err;
-            err = bt_mesh_gradient_srv_data_send(gradient_srv,
-											gradient_srv->forwarding_table[i].addr,
+            if(gradient_srv->forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED){
+                has_route = true;
+            }           
+		}
+
+        int err;
+        err = bt_mesh_gradient_srv_data_send(gradient_srv,
+											gradient_srv->forwarding_table[0].addr,
 											received_data);
-			if(!err){
-				break;
-			}
+        if (err) {
+			LOG_INF("ERROR: Forward failed with error %d\n", err);
+		} else {
+			LOG_INF("SUCCESS: Data %d sent to 0x%04x\n", received_data, gradient_srv->forwarding_table[0].addr);
 		}
 	}
     return 0;
@@ -293,7 +310,7 @@ static int bt_mesh_gradient_srv_update_handler(const struct bt_mesh_model *model
     
     net_buf_simple_add_u8(buf, gradient_srv->gradient);
 
-    printk("Auto-published gradient: %d\n", gradient_srv->gradient);
+    LOG_INF("Auto-published gradient: %d\n", gradient_srv->gradient);
 
     return 0;
 }
@@ -359,7 +376,7 @@ static int bt_mesh_gradient_srv_start(const struct bt_mesh_model *model)
         model->pub->ttl = 0;
         model->pub->period = BT_MESH_PUB_PERIOD_SEC(5);
         
-        printk("Auto-configured publication: addr=0x%04x\n", 
+        LOG_INF("Auto-configured publication: addr=0x%04x\n", 
                model->pub->addr);
         
         k_work_schedule(&initial_publish_work, K_MSEC(500));
@@ -401,6 +418,24 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
 }
 
 /* .. include_startingpoint_gradient_srv_rst_9 */
+//Callback khi message được gửi xong (hoặc thất bại)
+static void data_send_end_cb(int err, void *user_data)
+{
+    uint16_t dest_addr = (uint16_t)(uintptr_t)user_data;
+    
+    if (err) {
+        LOG_ERR("[TX Complete] FAILED to send to 0x%04x, err=%d", dest_addr, err);
+    } else {
+        LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
+    }
+}
+
+//Callback structure
+static const struct bt_mesh_send_cb data_send_cb = {
+    .start = NULL,  // Optional: called when transmission starts
+    .end = data_send_end_cb,  // Called when transmission completes
+};
+
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
                                     uint16_t addr,
                                     uint16_t data)
@@ -409,14 +444,16 @@ int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
         .addr = addr,
         .app_idx = gradient_srv->model->keys[0],
         .send_ttl = 0,
-        .send_rel = true,
+        .send_rel = true,  // Reliable = chờ ACK
     };
 
     BT_MESH_MODEL_BUF_DEFINE(buf, BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE, 2);
     bt_mesh_model_msg_init(&buf, BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE);
-
     net_buf_simple_add_le16(&buf, data);
     
-    return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, NULL, NULL);
+    // Truyền callback để biết kết quả thực sự
+    return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
+                              &data_send_cb, 
+                              (void *)(uintptr_t)addr);  // user_data = dest_addr
 }
 /* .. include_endpoint_gradient_srv_rst_9 */
