@@ -24,14 +24,13 @@ static int blink_count2 = 0;
 static struct k_work_delayable led1_blink_work;
 static int blink_count1 = 0;
 
-// Biến global để lưu gradient_srv pointer
 static struct bt_mesh_gradient_srv *g_gradient_srv = NULL;
 
-// Khai báo work item cho initial publish
 static struct k_work_delayable initial_publish_work;
-
-/* Work queue cho gradient processing */
 static struct k_work_delayable gradient_process_work;
+
+/* Work item cho data send retry */
+static struct k_work_delayable data_retry_work;
 
 /* Context để lưu data gradient processing */
 struct gradient_context {
@@ -42,6 +41,17 @@ struct gradient_context {
 };
 
 static struct gradient_context gradient_ctx = {0};
+
+/* Context cho data send với retry */
+struct data_send_context {
+    struct bt_mesh_gradient_srv *gradient_srv;
+    uint16_t data;
+    uint16_t sender_addr;      // Địa chỉ node gửi ban đầu (để skip)
+    int current_index;         // Index hiện tại trong forwarding table
+    bool active;               // Đang có pending send
+};
+
+static struct data_send_context data_send_ctx = {0};
 
 // Work handler để nháy LED 2
 static void led2_blink_handler(struct k_work *work)
@@ -99,6 +109,137 @@ static void initial_publish_handler(struct k_work *work)
                    g_gradient_srv->gradient);
         }
     }
+}
+
+/* Hàm xóa entry khỏi forwarding table */
+static void remove_forwarding_entry(struct bt_mesh_gradient_srv *gradient_srv, int index)
+{
+    if (index < 0 || index >= CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
+        return;
+    }
+    
+    uint16_t removed_addr = gradient_srv->forwarding_table[index].addr;
+    
+    // Shift các entries lên
+    for (int i = index; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE - 1; i++) {
+        gradient_srv->forwarding_table[i] = gradient_srv->forwarding_table[i + 1];
+    }
+    
+    // Clear entry cuối cùng
+    int last = CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE - 1;
+    gradient_srv->forwarding_table[last].addr = BT_MESH_ADDR_UNASSIGNED;
+    gradient_srv->forwarding_table[last].rssi = INT8_MIN;
+    gradient_srv->forwarding_table[last].gradient = UINT8_MAX;
+    
+    LOG_INF("[Forwarding] Removed 0x%04x from index %d", removed_addr, index);
+}
+
+/* Forward declaration */
+static int bt_mesh_gradient_srv_data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
+                                                    uint16_t addr,
+                                                    uint16_t data);
+
+/* Work handler cho data retry */
+static void data_retry_handler(struct k_work *work)
+{
+    struct data_send_context *ctx = &data_send_ctx;
+    
+    if (!ctx->active || !ctx->gradient_srv) {
+        ctx->active = false;
+        return;
+    }
+    
+    struct bt_mesh_gradient_srv *gradient_srv = ctx->gradient_srv;
+    
+    // Tìm next valid entry
+    while (ctx->current_index < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
+        uint16_t next_addr = gradient_srv->forwarding_table[ctx->current_index].addr;
+        
+        // Hết entry valid
+        if (next_addr == BT_MESH_ADDR_UNASSIGNED) {
+            LOG_ERR("[Retry] No more valid entries, data lost!");
+            ctx->active = false;
+            return;
+        }
+        
+        // Skip sender (tránh gửi ngược lại)
+        if (next_addr == ctx->sender_addr) {
+            LOG_DBG("[Retry] Skipping sender 0x%04x", next_addr);
+            ctx->current_index++;
+            continue;
+        }
+        
+        // Thử gửi đến entry này
+        LOG_INF("[Retry] Trying index %d: addr=0x%04x", ctx->current_index, next_addr);
+        
+        int err = bt_mesh_gradient_srv_data_send_internal(gradient_srv, next_addr, ctx->data);
+        
+        if (err) {
+            LOG_ERR("[Retry] Failed to queue send to 0x%04x, err=%d", next_addr, err);
+            // Xóa entry này và thử tiếp
+            remove_forwarding_entry(gradient_srv, ctx->current_index);
+            // Không tăng current_index vì entries đã shift
+            continue;
+        }
+        
+        // Đã queue thành công, chờ callback
+        return;
+    }
+    
+    // Hết entries
+    LOG_ERR("[Retry] All entries exhausted, data lost!");
+    ctx->active = false;
+}
+
+/*Callback khi message được gửi xong */
+static void data_send_end_cb(int err, void *user_data)
+{
+    uint16_t dest_addr = (uint16_t)(uintptr_t)user_data;
+    struct data_send_context *ctx = &data_send_ctx;
+    
+    if (err) {
+        LOG_ERR("[TX Complete] FAILED to send to 0x%04x, err=%d", dest_addr, err);
+        
+        if (ctx->active && ctx->gradient_srv) {
+            // Xóa entry thất bại
+            LOG_INF("[TX Complete] Removing failed node 0x%04x from forwarding table", dest_addr);
+            remove_forwarding_entry(ctx->gradient_srv, ctx->current_index);
+            
+            //Schedule retry (không tăng index vì entries đã shift)
+            k_work_schedule(&data_retry_work, K_MSEC(100));
+        }
+    } else {
+        LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
+        ctx->active = false;  // Hoàn thành
+    }
+}
+
+//Callback structure
+static const struct bt_mesh_send_cb data_send_cb = {
+    .start = NULL,  // Optional: called when transmission starts
+    .end = data_send_end_cb,  // Called when transmission completes
+};
+
+/* Internal send function (không update context) */
+static int bt_mesh_gradient_srv_data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
+                                                    uint16_t addr,
+                                                    uint16_t data)
+{
+    struct bt_mesh_msg_ctx ctx = {
+        .addr = addr,
+        .app_idx = gradient_srv->model->keys[0],
+        .send_ttl = 0,
+        .send_rel = true,  
+    };
+
+    BT_MESH_MODEL_BUF_DEFINE(buf, BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE, 2);
+    bt_mesh_model_msg_init(&buf, BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE);
+    net_buf_simple_add_le16(&buf, data);
+    
+    // Truyền callback để biết kết quả thực sự
+    return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
+                              &data_send_cb, 
+                              (void *)(uintptr_t)addr);  
 }
 
 // Work handler để xử lý forwarding table và cập nhật gradient 
@@ -242,43 +383,76 @@ static int handle_gradient_mesage(const struct bt_mesh_model *model,
 
 /* .. include_startingpoint_gradient_srv_rst_1 */
 static int handle_data_message(const struct bt_mesh_model *model, 
-                                  struct bt_mesh_msg_ctx *ctx,
-                  struct net_buf_simple *buf)
+                               struct bt_mesh_msg_ctx *ctx,
+                               struct net_buf_simple *buf)
 {
     struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
+
+    uint16_t sender_addr = ctx->addr;
     
     uint16_t received_data = net_buf_simple_pull_le16(buf);
 
-    LOG_INF("Received data message %d from 0x%04x\n", 
-           received_data, ctx->addr);
+    LOG_INF("Received data %d from 0x%04x", received_data, sender_addr);
 
+    // Sink node: xử lý data
     if (gradient_srv->gradient == 0) {
         static bool led0_state = false;
         led0_state = !led0_state;
-        
-        dk_set_led(DK_LED1, led0_state); 
+        dk_set_led(DK_LED1, led0_state);
+        LOG_INF("[Sink] Data received: %d", received_data);
         return 0;
-    }else{
-		blink_count1 = 0;
-		k_work_schedule(&led1_blink_work, K_NO_WAIT);
-        bool has_route = false;
-
-		for(int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++){
-            if(gradient_srv->forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED){
-                has_route = true;
-            }           
-		}
-
-        int err;
-        err = bt_mesh_gradient_srv_data_send(gradient_srv,
-											gradient_srv->forwarding_table[0].addr,
-											received_data);
+    }
+    
+    // Regular node: forward data
+    blink_count1 = 0;
+    k_work_schedule(&led1_blink_work, K_NO_WAIT);
+    
+    // Kiểm tra có route không
+    if (gradient_srv->forwarding_table[0].addr == BT_MESH_ADDR_UNASSIGNED) {
+        LOG_ERR("[Forward] No route available!");
+        return 0;
+    }
+    
+    // Setup retry context
+    data_send_ctx.gradient_srv = gradient_srv;
+    data_send_ctx.data = received_data;
+    data_send_ctx.sender_addr = sender_addr;
+    data_send_ctx.current_index = 0;
+    data_send_ctx.active = true;
+    
+    // Tìm entry đầu tiên không phải sender
+    while (data_send_ctx.current_index < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
+        uint16_t dest_addr = gradient_srv->forwarding_table[data_send_ctx.current_index].addr;
+        
+        if (dest_addr == BT_MESH_ADDR_UNASSIGNED) {
+            LOG_ERR("[Forward] No valid destination!");
+            data_send_ctx.active = false;
+            return 0;
+        }
+        
+        // Skip sender
+        if (dest_addr == sender_addr) {
+            data_send_ctx.current_index++;
+            continue;
+        }
+        
+        // Gửi đến entry này
+        LOG_INF("[Forward] Sending data %d to 0x%04x (index %d)", 
+                received_data, dest_addr, data_send_ctx.current_index);
+        
+        int err = bt_mesh_gradient_srv_data_send_internal(gradient_srv, dest_addr, received_data);
+        
         if (err) {
-			LOG_INF("ERROR: Forward failed with error %d\n", err);
-		} else {
-			LOG_INF("SUCCESS: Data %d sent to 0x%04x\n", received_data, gradient_srv->forwarding_table[0].addr);
-		}
-	}
+            LOG_ERR("[Forward] Failed to queue, err=%d", err);
+            remove_forwarding_entry(gradient_srv, data_send_ctx.current_index);
+            continue;
+        }
+        
+        return 0;  // Chờ callback
+    }
+    
+    LOG_ERR("[Forward] No valid destination after filtering!");
+    data_send_ctx.active = false;
     return 0;
 }
 /* .. include_endpoint_gradient_srv_rst_1 */
@@ -355,6 +529,9 @@ static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model)
     /* Khởi tạo gradient process work */
     k_work_init_delayable(&gradient_process_work, gradient_process_handler);
 
+    // Khởi tạo data retry work
+    k_work_init_delayable(&data_retry_work, data_retry_handler);
+
 	return 0;
 }
 /* .. include_endpoint_gradient_srv_rst_4 */
@@ -417,43 +594,16 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
     return bt_mesh_model_publish(gradient_srv->model);
 }
 
-/* .. include_startingpoint_gradient_srv_rst_9 */
-//Callback khi message được gửi xong (hoặc thất bại)
-static void data_send_end_cb(int err, void *user_data)
-{
-    uint16_t dest_addr = (uint16_t)(uintptr_t)user_data;
-    
-    if (err) {
-        LOG_ERR("[TX Complete] FAILED to send to 0x%04x, err=%d", dest_addr, err);
-    } else {
-        LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
-    }
-}
-
-//Callback structure
-static const struct bt_mesh_send_cb data_send_cb = {
-    .start = NULL,  // Optional: called when transmission starts
-    .end = data_send_end_cb,  // Called when transmission completes
-};
-
+/* Public API - khởi tạo retry context */
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
                                     uint16_t addr,
                                     uint16_t data)
 {
-    struct bt_mesh_msg_ctx ctx = {
-        .addr = addr,
-        .app_idx = gradient_srv->model->keys[0],
-        .send_ttl = 0,
-        .send_rel = true,  // Reliable = chờ ACK
-    };
-
-    BT_MESH_MODEL_BUF_DEFINE(buf, BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE, 2);
-    bt_mesh_model_msg_init(&buf, BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE);
-    net_buf_simple_add_le16(&buf, data);
+    data_send_ctx.gradient_srv = gradient_srv;
+    data_send_ctx.data = data;
+    data_send_ctx.sender_addr = BT_MESH_ADDR_UNASSIGNED;
+    data_send_ctx.current_index = 0;
+    data_send_ctx.active = true;
     
-    // Truyền callback để biết kết quả thực sự
-    return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
-                              &data_send_cb, 
-                              (void *)(uintptr_t)addr);  // user_data = dest_addr
+    return bt_mesh_gradient_srv_data_send_internal(gradient_srv, addr, data);
 }
-/* .. include_endpoint_gradient_srv_rst_9 */
