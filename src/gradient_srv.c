@@ -29,8 +29,11 @@ static struct bt_mesh_gradient_srv *g_gradient_srv = NULL;
 static struct k_work_delayable initial_publish_work;
 static struct k_work_delayable gradient_process_work;
 
-/* Work item cho data send retry */
+/* Work item for data send retry */
 static struct k_work_delayable data_retry_work;
+
+/* Work item for cleanup expired nodes */
+static struct k_work_delayable cleanup_work;
 
 /* Context để lưu data gradient processing */
 struct gradient_context {
@@ -130,8 +133,83 @@ static void remove_forwarding_entry(struct bt_mesh_gradient_srv *gradient_srv, i
     gradient_srv->forwarding_table[last].addr = BT_MESH_ADDR_UNASSIGNED;
     gradient_srv->forwarding_table[last].rssi = INT8_MIN;
     gradient_srv->forwarding_table[last].gradient = UINT8_MAX;
+    gradient_srv->forwarding_table[last].last_seen = 0;  
     
     LOG_INF("[Forwarding] Removed 0x%04x from index %d", removed_addr, index);
+}
+
+/* Work handler để cleanup expired nodes */
+static void cleanup_handler(struct k_work *work)
+{
+    if (g_gradient_srv == NULL) {
+        return;
+    }
+    
+    int64_t current_time = k_uptime_get();
+    bool table_changed = false;
+    
+    LOG_DBG("[Cleanup] Running cleanup check...");
+    
+    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+        if (g_gradient_srv->forwarding_table[i].addr == BT_MESH_ADDR_UNASSIGNED) {
+            continue;
+        }
+        
+        int64_t time_diff = current_time - g_gradient_srv->forwarding_table[i].last_seen;
+        
+        if (time_diff > CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS) {
+            LOG_WRN("[Cleanup] Node 0x%04x expired (last seen %lld ms ago)",
+                    g_gradient_srv->forwarding_table[i].addr, time_diff);
+            
+            // Xóa entry expired
+            remove_forwarding_entry(g_gradient_srv, i);
+            
+            table_changed = true;
+            i--;  // Recheck current index after shift
+        }
+    }
+    
+    // ✅ Cập nhật lại gradient nếu bảng thay đổi
+    if (table_changed) {
+        if (g_gradient_srv->forwarding_table[0].addr != BT_MESH_ADDR_UNASSIGNED) {
+            uint8_t best_parent_gradient = g_gradient_srv->forwarding_table[0].gradient;
+            
+            // Recalculate gradient based on best available parent
+            uint8_t new_gradient = best_parent_gradient + 1;
+            
+            if (g_gradient_srv->gradient != new_gradient) {
+                uint8_t old_gradient = g_gradient_srv->gradient;
+                g_gradient_srv->gradient = new_gradient;
+                
+                LOG_INF("[Cleanup] Gradient recalculated: %d -> %d", 
+                        old_gradient, g_gradient_srv->gradient);
+                
+                bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+            }
+        } else {
+            // Không còn parent nào → reset gradient về max (nếu không phải sink)
+            if (g_gradient_srv->gradient != UINT8_MAX && g_gradient_srv->gradient != 0) {
+                LOG_WRN("[Cleanup] No parents available, resetting gradient to 255");
+                g_gradient_srv->gradient = UINT8_MAX;
+                bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+            }
+        }
+        
+        // In forwarding table sau cleanup
+        LOG_INF("[Cleanup] Forwarding table after cleanup:");
+        for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+            if (g_gradient_srv->forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
+                LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
+                        i,
+                        g_gradient_srv->forwarding_table[i].addr,
+                        g_gradient_srv->forwarding_table[i].gradient,
+                        g_gradient_srv->forwarding_table[i].rssi);
+            }
+        }
+    }
+    
+    // ✅ Reschedule cleanup (chạy mỗi 10 giây)
+    k_work_schedule(&cleanup_work, K_MSEC(10000));
 }
 
 /* Forward declaration */
@@ -258,6 +336,8 @@ static void gradient_process_handler(struct k_work *work)
     LOG_INF("Received gradient %d from 0x%04x (RSSI: %d)\n", 
            msg, sender_addr, rssi);
     
+    int64_t current_time = k_uptime_get();
+    
     //Xử lý forwarding table
     int insert_pos = -1;
     int sender_pos = -1;
@@ -287,8 +367,11 @@ static void gradient_process_handler(struct k_work *work)
                 insert_pos = -1;
             }
 
+
             gradient_srv->forwarding_table[sender_pos].rssi = rssi;
             gradient_srv->forwarding_table[sender_pos].gradient = msg;
+            gradient_srv->forwarding_table[sender_pos].last_seen = current_time;
+            
             LOG_INF("[Process] Updated existing entry at index [%d]: addr = [0x%04x], gradient = [%d]\n", 
                 sender_pos, sender_addr, msg);
             break;
@@ -306,6 +389,7 @@ static void gradient_process_handler(struct k_work *work)
             gradient_srv->forwarding_table[insert_pos].addr = sender_addr;
             gradient_srv->forwarding_table[insert_pos].rssi = rssi;
             gradient_srv->forwarding_table[insert_pos].gradient = msg;
+            gradient_srv->forwarding_table[insert_pos].last_seen = current_time;
             
             LOG_INF("[Process] Inserted at index [%d]: addr=0x%04x, gradient=%d\n", 
                 insert_pos, sender_addr, msg);
@@ -317,6 +401,7 @@ static void gradient_process_handler(struct k_work *work)
             gradient_srv->forwarding_table[insert_pos].addr = sender_addr;
             gradient_srv->forwarding_table[insert_pos].rssi = rssi;
             gradient_srv->forwarding_table[insert_pos].gradient = msg;
+            gradient_srv->forwarding_table[insert_pos].last_seen = current_time;  
 
             LOG_INF("[Process] Moved entry from index [%d] to index [%d]: addr = [0x%04x], gradient = [%d]\n", 
                 sender_pos, insert_pos, sender_addr, msg);
@@ -531,6 +616,9 @@ static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model)
 
     // Khởi tạo data retry work
     k_work_init_delayable(&data_retry_work, data_retry_handler);
+    
+    // Khởi tạo cleanup work
+    k_work_init_delayable(&cleanup_work, cleanup_handler);
 
 	return 0;
 }
@@ -558,6 +646,11 @@ static int bt_mesh_gradient_srv_start(const struct bt_mesh_model *model)
         
         k_work_schedule(&initial_publish_work, K_MSEC(500));
     }
+    
+    // ✅ Bắt đầu cleanup timer (chạy sau 10 giây đầu tiên)
+    k_work_schedule(&cleanup_work, K_MSEC(10000));
+    LOG_INF("Cleanup timer started (timeout: %d ms)", 
+            CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS);
     
     return 0;
 }

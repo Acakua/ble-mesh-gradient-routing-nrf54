@@ -142,6 +142,7 @@ const struct bt_mesh_comp *model_handler_init(void)
         gradient_srv.forwarding_table[i].addr = BT_MESH_ADDR_UNASSIGNED;
         gradient_srv.forwarding_table[i].rssi = INT8_MIN;
         gradient_srv.forwarding_table[i].gradient = UINT8_MAX;
+        gradient_srv.forwarding_table[i].last_seen = 0; 
     }
 
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE

@@ -29,10 +29,15 @@ extern "C" {
 				     CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH \
 				     + 1) /* + \0 */
 
+#ifndef CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS
+#define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS 30000  // 30 giây
+#endif
+
 typedef struct bt_mesh_gradient_srv_forwarding_ctx{
 	uint16_t addr;
 	int8_t rssi;
 	uint8_t gradient;
+	int64_t last_seen;  
 } bt_mesh_gradient_srv_forwarding_ctx;
 
 /* Forward declaration of the Bluetooth Mesh Chat Client model context. */
