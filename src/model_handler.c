@@ -195,11 +195,12 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 		bool has_route = false;
 		for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
 			if (gradient_srv.forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
-				LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d\n",
+				LOG_INF("  [%d] addr = [0x%04x], gradient = [%d], rssi = [%d], last_seen = [%lld]\n",
 					   i,
 					   gradient_srv.forwarding_table[i].addr,
 					   gradient_srv.forwarding_table[i].gradient,
-					   gradient_srv.forwarding_table[i].rssi);
+					   gradient_srv.forwarding_table[i].rssi,
+					   gradient_srv.forwarding_table[i].last_seen);
 				has_route = true;
 			}
 		}

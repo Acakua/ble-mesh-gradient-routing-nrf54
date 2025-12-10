@@ -479,7 +479,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
     LOG_INF("Received data %d from 0x%04x", received_data, sender_addr);
 
-    // Sink node: xử lý data
     if (gradient_srv->gradient == 0) {
         static bool led0_state = false;
         led0_state = !led0_state;
@@ -488,7 +487,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
         return 0;
     }
     
-    // Regular node: forward data
     blink_count1 = 0;
     k_work_schedule(&led1_blink_work, K_NO_WAIT);
     
@@ -505,7 +503,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
     data_send_ctx.current_index = 0;
     data_send_ctx.active = true;
     
-    // Tìm entry đầu tiên không phải sender
     while (data_send_ctx.current_index < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
         uint16_t dest_addr = gradient_srv->forwarding_table[data_send_ctx.current_index].addr;
         
@@ -515,7 +512,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
             return 0;
         }
         
-        // Skip sender
         if (dest_addr == sender_addr) {
             data_send_ctx.current_index++;
             continue;
@@ -647,8 +643,8 @@ static int bt_mesh_gradient_srv_start(const struct bt_mesh_model *model)
         k_work_schedule(&initial_publish_work, K_MSEC(500));
     }
     
-    // ✅ Bắt đầu cleanup timer (chạy sau 10 giây đầu tiên)
-    k_work_schedule(&cleanup_work, K_MSEC(10000));
+    //Bắt đầu cleanup timer (chạy sau 10 giây đầu tiên)
+    k_work_schedule(&cleanup_work, K_MSEC(15000));
     LOG_INF("Cleanup timer started (timeout: %d ms)", 
             CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS);
     
