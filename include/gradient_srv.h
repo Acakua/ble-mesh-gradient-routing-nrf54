@@ -15,11 +15,11 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_VENDOR_MODEL_ID      0x000A
 
 /** Gradient message opcode. */
-#define BT_MESH_GRADIENT_SRV_OP_GRADIENT BT_MESH_MODEL_OP_3(0x0A, \
+#define BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS BT_MESH_MODEL_OP_3(0x0A, \
 				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
 /** Data message opcode. */
-#define BT_MESH_GRADIENT_SRV_OP_PRIVATE_MESSAGE BT_MESH_MODEL_OP_3(0x0B, \
+#define BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE BT_MESH_MODEL_OP_3(0x0B, \
 				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
 /* .. include_endpoint_gradient_srv_rst_1 */
@@ -81,7 +81,7 @@ struct bt_mesh_gradient_srv {
 	/** Publication message. */
 	struct net_buf_simple pub_msg;
 	/** Publication message buffer. */
-	uint8_t buf[BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT,
+	uint8_t buf[BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS,
 					  BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE)];
 	/** Handler function structure. */
 	const struct bt_mesh_gradient_srv_handlers *handlers;
