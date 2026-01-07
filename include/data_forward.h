@@ -1,0 +1,55 @@
+/*
+ * Copyright (c) 2024 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+#ifndef DATA_FORWARD_H
+#define DATA_FORWARD_H
+
+#include "gradient_srv.h"
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Initialize data forwarding module
+ *
+ * Must be called before using any data forwarding functions.
+ */
+void data_forward_init(void);
+
+/**
+ * @brief Forward data packet to next hop
+ *
+ * Attempts to send data to the best next hop. If sending fails,
+ * automatically retries with the next entry in forwarding table.
+ *
+ * @param gradient_srv Pointer to gradient server instance
+ * @param data Data payload to forward
+ * @param sender_addr Address of original sender (to avoid sending back)
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
+                      uint16_t data, uint16_t sender_addr);
+
+/**
+ * @brief Send data packet directly (for button press, no retry on sender skip)
+ *
+ * @param gradient_srv Pointer to gradient server instance
+ * @param addr Destination address
+ * @param data Data payload to send
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
+                             uint16_t addr, uint16_t data);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* DATA_FORWARD_H */

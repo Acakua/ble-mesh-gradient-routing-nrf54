@@ -12,6 +12,7 @@
 
 #include "gradient_srv.h"
 #include "model_handler.h"
+#include "led_indication.h"
 
 LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_DBG);
 
@@ -23,40 +24,15 @@ static uint16_t data_counter = 0;
 /******************************************************************************/
 /*************************** Health server setup ******************************/
 /******************************************************************************/
-/* Set up a repeating delayed work to blink the DK's LEDs when attention is
- * requested.
- */
-static struct k_work_delayable attention_blink_work;
-static bool attention;
-
-static void attention_blink(struct k_work *work)
-{
-	static int idx;
-	const uint8_t pattern[] = {
-		BIT(0) | BIT(1),
-		BIT(1) | BIT(2),
-		BIT(2) | BIT(3),
-		BIT(3) | BIT(0),
-	};
-
-	if (attention) {
-		dk_set_leds(pattern[idx++ % ARRAY_SIZE(pattern)]);
-		k_work_reschedule(&attention_blink_work, K_MSEC(30));
-	} else {
-		dk_set_leds(DK_NO_LEDS_MSK);
-	}
-}
 
 static void attention_on(const struct bt_mesh_model *mod)
 {
-	attention = true;
-	k_work_reschedule(&attention_blink_work, K_NO_WAIT);
+	led_indicate_attention(true);
 }
 
 static void attention_off(const struct bt_mesh_model *mod)
 {
-	/* Will stop rescheduling blink timer */
-	attention = false;
+	led_indicate_attention(false);
 }
 
 static const struct bt_mesh_health_srv_cb health_srv_cb = {
@@ -133,8 +109,6 @@ static const struct bt_mesh_comp comp = {
 /******************************************************************************/
 const struct bt_mesh_comp *model_handler_init(void)
 {
-    k_work_init_delayable(&attention_blink_work, attention_blink);
-
     chat_shell = shell_backend_uart_get_ptr();
 
     // Khởi tạo forwarding table cho TẤT CẢ nodes
