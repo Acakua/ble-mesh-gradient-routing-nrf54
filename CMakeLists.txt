@@ -12,6 +12,9 @@ target_sources(app PRIVATE
 	src/routing_policy.c
 	src/led_indication.c
 	src/data_forward.c
-	src/gradient_work.c)
+	src/gradient_work.c
+	src/reverse_routing.c
+	src/heartbeat.c
+	src/shell_commands.c)
 target_include_directories(app PRIVATE include)
 # NORDIC SDK APP END

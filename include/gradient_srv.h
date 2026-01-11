@@ -22,7 +22,20 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE BT_MESH_MODEL_OP_3(0x0B, \
 				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
+/** Backprop data message opcode (downlink from Gateway to nodes). */
+#define BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA BT_MESH_MODEL_OP_3(0x0C, \
+				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
 /* .. include_endpoint_gradient_srv_rst_1 */
+
+/** Default TTL for BACKPROP packets */
+#define BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL  10
+
+/** Minimum TTL to forward (drop if TTL <= this value) */
+#define BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL      1
+
+/** Heartbeat data marker - distinguishes heartbeat from real data */
+#define BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER      0xFFFF
 
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE 1
 #define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE (\
@@ -33,11 +46,17 @@ extern "C" {
 #define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS 30000  // 30 giây
 #endif
 
+/**
+ * @brief Forward declaration for backprop_node (defined in reverse_routing.h)
+ */
+struct backprop_node;
+
 typedef struct bt_mesh_gradient_srv_forwarding_ctx{
 	uint16_t addr;
 	int8_t rssi;
 	uint8_t gradient;
-	int64_t last_seen;  
+	int64_t last_seen;
+	struct backprop_node *backprop_dest; /**< Linked list of reachable destinations (for reverse routing) */
 } bt_mesh_gradient_srv_forwarding_ctx;
 
 /* Forward declaration of the Bluetooth Mesh Chat Client model context. */
@@ -67,6 +86,13 @@ struct bt_mesh_gradient_srv_handlers {
 	 * @param[in] cli Chat Client instance that has been started.
 	 */
 	void (*const start)(struct bt_mesh_gradient_srv *chat);
+
+	/** @brief Called when BACKPROP_DATA is received and this node is the destination.
+	 *
+	 * @param[in] srv Gradient server instance.
+	 * @param[in] data The received data payload.
+	 */
+	void (*const data_received)(struct bt_mesh_gradient_srv *srv, uint16_t data);
 };
 
 /* .. include_startingpoint_gradient_srv_rst_3 */
@@ -120,6 +146,24 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
 					  uint16_t addr,
 					  uint16_t data);
+
+/** @brief Send BACKPROP_DATA to a specific destination.
+ *
+ * Looks up the reverse routing table to find nexthop, then sends
+ * BACKPROP_DATA packet towards the destination.
+ *
+ * @param gradient_srv Pointer to gradient server instance.
+ * @param dest_addr Address of final destination node.
+ * @param payload Data payload to send.
+ *
+ * @retval 0 Successfully sent the message.
+ * @retval -EINVAL Cannot send to self.
+ * @retval -ENETUNREACH No route to destination.
+ * @retval -EAGAIN The device has not been provisioned.
+ */
+int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv,
+                                       uint16_t dest_addr,
+                                       uint16_t payload);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

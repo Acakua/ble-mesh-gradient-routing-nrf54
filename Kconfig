@@ -10,7 +10,7 @@ menu "Nordic Bluetooth Mesh chat client sample"
 
 config BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE
     int "Forwarding table size"
-    default 3
+    default 8
     range 1 255
     help
       Maximum number of entries in the forwarding table.
@@ -43,6 +43,48 @@ config BT_MESH_GRADIENT_SINK_NODE
       If enabled, this node will be configured as the sink node
       (gradient = 0) in the gradient routing protocol.
       Only ONE node in the network should have this enabled.
+
+config BT_MESH_GRADIENT_SRV_HEARTBEAT_ENABLED
+    bool "Enable heartbeat mechanism for route maintenance"
+    default y
+    help
+      When enabled, each node (except Gateway) will periodically send
+      a heartbeat DATA packet to maintain its route in the reverse
+      routing tables of upstream nodes and Gateway.
+      
+      This ensures Gateway can always send BACKPROP_DATA to any node,
+      even if that node hasn't sent real data recently.
+
+config BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC
+    int "Heartbeat interval in seconds"
+    default 30
+    range 10 300
+    depends on BT_MESH_GRADIENT_SRV_HEARTBEAT_ENABLED
+    help
+      How often each node sends a heartbeat packet.
+      
+      Recommended values:
+      - 30 seconds: Good balance between freshness and traffic
+      - Lower values: More responsive but more network traffic
+      - Higher values: Less traffic but routes may expire
+      
+      Note: Should be less than CONFIG_BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC
+      to prevent route expiration between heartbeats.
+
+config BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC
+    int "Reverse routing table entry timeout in seconds"
+    default 90
+    range 30 600
+    help
+      How long a reverse route entry stays valid without being refreshed.
+      
+      When a node sends DATA (including heartbeat), the route to that node
+      is refreshed. If no DATA is received from a node within this timeout,
+      the route entry will be removed.
+      
+      Recommended: 3x HEARTBEAT_INTERVAL_SEC (default 90 = 3*30)
+      This allows for occasional packet loss while still cleaning up
+      routes to nodes that have gone offline.
 
 endmenu
 

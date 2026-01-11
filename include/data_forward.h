@@ -26,15 +26,17 @@ void data_forward_init(void);
  *
  * Attempts to send data to the best next hop. If sending fails,
  * automatically retries with the next entry in forwarding table.
+ * Packet format: [original_source: 2 bytes] + [data: 2 bytes]
  *
  * @param gradient_srv Pointer to gradient server instance
  * @param data Data payload to forward
- * @param sender_addr Address of original sender (to avoid sending back)
+ * @param original_source Address of node that originally created the packet
+ * @param sender_addr Address of immediate sender (to avoid sending back)
  *
  * @return 0 on success, negative error code on failure
  */
 int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
-                      uint16_t data, uint16_t sender_addr);
+                      uint16_t data, uint16_t original_source, uint16_t sender_addr);
 
 /**
  * @brief Send data packet directly (for button press, no retry on sender skip)

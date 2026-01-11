@@ -7,6 +7,8 @@
 #include "gradient_work.h"
 #include "neighbor_table.h"
 #include "routing_policy.h"
+#include "heartbeat.h"
+#include "reverse_routing.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -106,6 +108,20 @@ static void cleanup_handler(struct k_work *work)
         }
     }
 
+    /* ========================================
+     * Cleanup reverse routing table
+     * ======================================== */
+    int64_t rrt_timeout_ms = CONFIG_BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC * 1000LL;
+    int rrt_removed = rrt_cleanup_expired(
+        g_gradient_srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+        current_time,
+        rrt_timeout_ms);
+    
+    if (rrt_removed > 0) {
+        LOG_INF("[Cleanup] RRT: Removed %d expired reverse routes", rrt_removed);
+    }
+
     /* Update gradient based on best remaining parent */
     if (table_changed) {
         const neighbor_entry_t *best = nt_best(
@@ -122,11 +138,16 @@ static void cleanup_handler(struct k_work *work)
                 LOG_INF("[Process] Gradient updated: [%d] -> [%d]",
                     old_gradient, g_gradient_srv->gradient);
 
+                /* Notify heartbeat module of gradient change */
+                heartbeat_update_gradient(g_gradient_srv->gradient);
+
                 bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
             }
         } else {
             LOG_WRN("[Cleanup] No parents available, resetting gradient to 255");
             g_gradient_srv->gradient = UINT8_MAX;
+            /* Notify heartbeat module of gradient change */
+            heartbeat_update_gradient(g_gradient_srv->gradient);
             bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
         }
         
@@ -201,6 +222,9 @@ static void gradient_process_handler(struct k_work *work)
             
             LOG_INF("[Process] Gradient updated: [%d] -> [%d]", 
                    old_gradient, gradient_srv->gradient);
+            
+            /* Notify heartbeat module of gradient change */
+            heartbeat_update_gradient(gradient_srv->gradient);
             
             bt_mesh_gradient_srv_gradient_send(gradient_srv);
         }

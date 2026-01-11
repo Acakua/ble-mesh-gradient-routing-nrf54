@@ -15,6 +15,11 @@
 #define GR_ADDR_UNASSIGNED 0x0000
 
 /**
+ * @brief Forward declaration for backprop_node (defined in reverse_routing.h)
+ */
+struct backprop_node;
+
+/**
  * @brief Neighbor entry structure for gradient routing forwarding table
  * 
  * NOTE: Field order MUST match bt_mesh_gradient_srv_forwarding_ctx in gradient_srv.h
@@ -24,6 +29,7 @@ typedef struct {
 	int8_t rssi;        /**< Received signal strength indicator */
 	uint8_t gradient;   /**< Gradient value (distance to sink) */
 	int64_t last_seen;  /**< Timestamp of last received message (uptime in ms) */
+	struct backprop_node *backprop_dest; /**< Linked list of reachable destinations (for reverse routing) */
 } neighbor_entry_t;
 
 #endif /* GRADIENT_TYPES_H */
