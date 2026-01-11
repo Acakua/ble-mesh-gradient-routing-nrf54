@@ -24,9 +24,6 @@ static const struct shell *chat_shell;
 // Counter cho data payload
 static uint16_t data_counter = 0;
 
-// Counter cho backprop test payload
-static uint16_t backprop_test_payload = 0;
-
 /******************************************************************************/
 /*************************** Health server setup ******************************/
 /******************************************************************************/
@@ -168,90 +165,10 @@ const struct bt_mesh_comp *model_handler_init(void)
 
 static void button_handler(uint32_t button_state, uint32_t has_changed)
 {
-    /* Button 1: Send DATA (regular node) or BACKPROP (Gateway) */
+    /* Button 1: Send DATA (regular node only) */
     if (has_changed & button_state & DK_BTN1_MSK) 
     {
         LOG_INF("\n=== Button 1 Pressed ===");
-        
-        // Kiểm tra nếu node chưa được provision
-		if (!bt_mesh_is_provisioned()) {
-			LOG_INF("ERROR: Node not provisioned yet");
-			return;
-		}
-		
-		// In thông tin node hiện tại
-		uint16_t my_addr = bt_mesh_model_elem(gradient_srv.model)->rt->addr;
-		LOG_INF("My address: 0x%04x, gradient: %d", my_addr, gradient_srv.gradient);
-		
-		// Nếu node này là Gateway (gradient=0), gửi BACKPROP thay vì DATA
-		if (gradient_srv.gradient == 0) {
-			LOG_INF("=== Gateway Mode: Sending BACKPROP ===");
-			
-			/* Tìm destination đầu tiên từ RRT */
-			uint16_t target = rrt_get_any_destination(
-				gradient_srv.forwarding_table,
-				CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
-			
-			if (target == 0) {
-				LOG_ERR("No known destinations in RRT. Wait for nodes to send heartbeat.");
-				rrt_print_table(gradient_srv.forwarding_table,
-								CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
-				LOG_INF("========================\n");
-				return;
-			}
-			
-			backprop_test_payload++;
-			LOG_INF("Sending BACKPROP to 0x%04x with payload=%d", target, backprop_test_payload);
-			
-			int err = bt_mesh_gradient_srv_backprop_send(&gradient_srv, target, backprop_test_payload);
-			if (err) {
-				LOG_ERR("Failed to send BACKPROP, err=%d", err);
-			} else {
-				LOG_INF("BACKPROP sent successfully!");
-			}
-			
-			LOG_INF("========================\n");
-			return;
-		}
-		
-		// Regular node: Gửi DATA đến sink
-		// In forwarding table
-		LOG_INF("Forwarding table:");
-		bool has_route = false;
-		for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
-			if (gradient_srv.forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
-				LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
-					   i,
-					   gradient_srv.forwarding_table[i].addr,
-					   gradient_srv.forwarding_table[i].gradient,
-					   gradient_srv.forwarding_table[i].rssi);
-				has_route = true;
-			}
-		}
-		
-		if (!has_route) 
-		{
-			LOG_INF("ERROR: No route available, waiting for gradient messages...");
-			LOG_INF("========================\n");
-			return;
-		}
-        
-        data_counter++;
-        uint16_t dest_addr = gradient_srv.forwarding_table[0].addr;
-
-        LOG_INF("Sending data %d to 0x%04x...", data_counter, dest_addr);
-
-        bt_mesh_gradient_srv_data_send(&gradient_srv,
-                                                  dest_addr,
-                                                  data_counter);
-       
-        LOG_INF("========================\n");
-    }
-    
-    /* Button 2: Print debug info (Forwarding table + RRT + Heartbeat status) */
-    if (has_changed & button_state & DK_BTN2_MSK)
-    {
-        LOG_INF("\n=== Button 2 Pressed: Debug Info ===");
         
         if (!bt_mesh_is_provisioned()) {
             LOG_INF("ERROR: Node not provisioned yet");
@@ -261,34 +178,47 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
         uint16_t my_addr = bt_mesh_model_elem(gradient_srv.model)->rt->addr;
         LOG_INF("My address: 0x%04x, gradient: %d", my_addr, gradient_srv.gradient);
         
-        /* Print forwarding table */
-        LOG_INF("--- Forwarding Table ---");
-        bool has_neighbors = false;
+        /* Gateway should use shell command: mesh backprop <addr> */
+        if (gradient_srv.gradient == 0) {
+            LOG_INF("Gateway mode: Use shell command 'mesh backprop <addr>' to send BACKPROP");
+            LOG_INF("========================\n");
+            return;
+        }
+        
+        /* Regular node: Send DATA to sink */
+        bool has_route = false;
         for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
             if (gradient_srv.forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
-                int64_t age_sec = (k_uptime_get() - gradient_srv.forwarding_table[i].last_seen) / 1000;
-                LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d, age=%lld sec",
-                        i,
-                        gradient_srv.forwarding_table[i].addr,
-                        gradient_srv.forwarding_table[i].gradient,
-                        gradient_srv.forwarding_table[i].rssi,
-                        age_sec);
-                has_neighbors = true;
+                has_route = true;
+                break;
             }
         }
-        if (!has_neighbors) {
-            LOG_INF("  (empty - no neighbors)");
+        
+        if (!has_route) {
+            LOG_INF("ERROR: No route available, waiting for gradient messages...");
+            LOG_INF("========================\n");
+            return;
         }
         
-        /* Print reverse routing table */
-        LOG_INF("--- Reverse Routing Table ---");
-        rrt_print_table(gradient_srv.forwarding_table,
-                        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
-        
-        /* Print heartbeat status */
-        LOG_INF("--- Heartbeat Status ---");
-        LOG_INF("  Active: %s", heartbeat_is_active() ? "YES" : "NO");
-        
+        data_counter++;
+        uint16_t dest_addr = gradient_srv.forwarding_table[0].addr;
+
+        LOG_INF("Sending data %d to 0x%04x...", data_counter, dest_addr);
+
+        bt_mesh_gradient_srv_data_send(&gradient_srv, dest_addr, data_counter);
+       
         LOG_INF("========================\n");
+    }
+    
+    /* Button 2: Hint to use shell commands */
+    if (has_changed & button_state & DK_BTN2_MSK)
+    {
+        LOG_INF("\n=== Debug commands available via shell ===");
+        LOG_INF("  mesh info        - Show node info");
+        LOG_INF("  mesh fwd         - Show forwarding table");
+        LOG_INF("  mesh rrt         - Show reverse routing table");
+        LOG_INF("  mesh backprop    - Send BACKPROP (Gateway only)");
+        LOG_INF("  mesh destinations - List known destinations");
+        LOG_INF("==========================================\n");
     }
 }
