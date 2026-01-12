@@ -74,6 +74,7 @@ static void cleanup_handler(struct k_work *work)
     
     int64_t current_time = k_uptime_get();
     bool table_changed = false;
+    bool should_publish = false;  // Flag to defer publication
     
     LOG_DBG("[Cleanup] Running cleanup check...");
     
@@ -97,6 +98,12 @@ static void cleanup_handler(struct k_work *work)
             
             LOG_WRN("[Cleanup] Node 0x%04x expired (last seen %lld ms ago)",
                     entry->addr, current_time - entry->last_seen);
+            
+            /* Free backprop_dest linked list before removing entry */
+            rrt_clear_entry(
+                (void *)g_gradient_srv->forwarding_table,
+                CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                i);
             
             uint16_t removed_addr = nt_remove(
                 (neighbor_entry_t *)g_gradient_srv->forwarding_table,
@@ -155,14 +162,16 @@ static void cleanup_handler(struct k_work *work)
                 /* Notify heartbeat module of gradient change */
                 heartbeat_update_gradient(g_gradient_srv->gradient);
 
-                bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+                /* DEFER PUBLICATION */
+                should_publish = true;
             }
         } else {
             LOG_WRN("[Cleanup] No parents available, resetting gradient to 255");
             g_gradient_srv->gradient = UINT8_MAX;
             /* Notify heartbeat module of gradient change */
             heartbeat_update_gradient(g_gradient_srv->gradient);
-            bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+            /* DEFER PUBLICATION */
+            should_publish = true;
         }
 #endif
         
@@ -182,6 +191,11 @@ static void cleanup_handler(struct k_work *work)
 
     /* Unlock forwarding table */
     k_mutex_unlock(&g_gradient_srv->forwarding_table_mutex);
+
+    /* EXECUTE PUBLICATION SAFELY */
+    if (should_publish) {
+        bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+    }
 
     k_work_schedule(&cleanup_work, K_MSEC(CLEANUP_INTERVAL_MS));
 }

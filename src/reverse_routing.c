@@ -143,62 +143,62 @@ void rrt_init(void *table, size_t table_size)
 int rrt_add_dest(void *table, size_t table_size,
                  uint16_t nexthop_addr, uint16_t dest_addr, int64_t timestamp)
 {
-    bt_mesh_gradient_srv_forwarding_ctx *ft = 
-        (bt_mesh_gradient_srv_forwarding_ctx *)table;
+    bt_mesh_gradient_srv_forwarding_ctx *ft = (bt_mesh_gradient_srv_forwarding_ctx *)table;
     
-    /* Step 1: Check if dest exists in a DIFFERENT entry, remove if so */
-    for (size_t i = 0; i < table_size; i++) {
-        if (ft[i].addr != nexthop_addr && ft[i].addr != 0) {
-            backprop_node_t *found = find_dest_in_list(ft[i].backprop_dest, dest_addr);
-            if (found != NULL) {
-                LOG_INF("[RRT] Dest 0x%04x moved from nexthop 0x%04x to 0x%04x",
-                        dest_addr, ft[i].addr, nexthop_addr);
-                remove_dest_from_list(&ft[i].backprop_dest, dest_addr);
-                break;  /* Can only exist in one place */
-            }
-        }
-    }
-    
-    /* Step 2: Find entry for nexthop_addr */
-    bt_mesh_gradient_srv_forwarding_ctx *entry = find_entry_by_addr(ft, table_size, nexthop_addr);
-    if (entry == NULL) {
+    /* 1. Find target entry first */
+    bt_mesh_gradient_srv_forwarding_ctx *target_entry = find_entry_by_addr(ft, table_size, nexthop_addr);
+    if (target_entry == NULL) {
         LOG_WRN("[RRT] Nexthop 0x%04x not found in forwarding table", nexthop_addr);
         return -ENOENT;
     }
-    
-    /* Step 3: Check if dest already exists in this entry's list */
-    backprop_node_t *existing = find_dest_in_list(entry->backprop_dest, dest_addr);
+
+    /* 2. Check if it's already on the correct neighbor */
+    backprop_node_t *existing = find_dest_in_list(target_entry->backprop_dest, dest_addr);
     if (existing != NULL) {
-        /* Just update timestamp */
-        existing->last_seen = timestamp;
-        LOG_DBG("[RRT] Updated last_seen for dest 0x%04x via nexthop 0x%04x",
-                dest_addr, nexthop_addr);
+        existing->last_seen = timestamp; /* Just update time */
+        
+        /* Ensure it doesn't exist elsewhere (duplicate cleanup) */
+        for (size_t i = 0; i < table_size; i++) {
+             if (&ft[i] != target_entry && ft[i].addr != 0) {
+                 if (remove_dest_from_list(&ft[i].backprop_dest, dest_addr)) {
+                     LOG_WRN("[RRT] Fixed duplicate dest 0x%04x (removed from 0x%04x)", dest_addr, ft[i].addr);
+                 }
+             }
+        }
         return 0;
     }
-    
-    /* Step 4: Check if list is full, remove oldest if needed */
-    size_t count = count_list(entry->backprop_dest);
-    if (count >= RRT_MAX_DEST_PER_NEXTHOP) {
-        LOG_WRN("[RRT] Max destinations reached for nexthop 0x%04x, removing oldest",
-                nexthop_addr);
-        remove_oldest_from_list(&entry->backprop_dest);
-    }
-    
-    /* Step 5: Allocate new node */
+
+    /* 3. It's a Move or New Add. ALLOCATE FIRST to prevent data loss. */
     backprop_node_t *new_node = k_malloc(sizeof(backprop_node_t));
     if (new_node == NULL) {
-        LOG_ERR("[RRT] Failed to allocate memory for backprop node");
-        return -ENOMEM;
+        LOG_ERR("[RRT] Failed to allocate memory for backprop node. Keeping old route if any.");
+        return -ENOMEM; /* Abort before deleting anything */
     }
-    
-    /* Step 6: Initialize and insert at head */
+
+    /* 4. Now safe to remove from old location (Move operation) */
+    for (size_t i = 0; i < table_size; i++) {
+        if (ft[i].addr != nexthop_addr && ft[i].addr != 0) {
+            if (remove_dest_from_list(&ft[i].backprop_dest, dest_addr)) {
+                LOG_INF("[RRT] Dest 0x%04x moved from nexthop 0x%04x to 0x%04x",
+                        dest_addr, ft[i].addr, nexthop_addr);
+                break; /* Can only exist in one place */
+            }
+        }
+    }
+
+    /* 5. Check limits and insert */
+    size_t count = count_list(target_entry->backprop_dest);
+    if (count >= RRT_MAX_DEST_PER_NEXTHOP) {
+        LOG_WRN("[RRT] Max destinations reached for nexthop 0x%04x, removing oldest", nexthop_addr);
+        remove_oldest_from_list(&target_entry->backprop_dest);
+    }
+
     new_node->addr = dest_addr;
     new_node->last_seen = timestamp;
-    new_node->next = entry->backprop_dest;
-    entry->backprop_dest = new_node;
+    new_node->next = target_entry->backprop_dest;
+    target_entry->backprop_dest = new_node;
     
     LOG_INF("[RRT] Added dest 0x%04x via nexthop 0x%04x", dest_addr, nexthop_addr);
-    
     return 0;
 }
 

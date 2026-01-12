@@ -23,7 +23,11 @@ extern "C" {
 /**
  * @brief Maximum destinations per nexthop (to prevent memory exhaustion)
  */
-#define RRT_MAX_DEST_PER_NEXTHOP  32
+#ifdef CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST
+  #define RRT_MAX_DEST_PER_NEXTHOP CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST
+#else
+  #define RRT_MAX_DEST_PER_NEXTHOP 50 /* Default fallback */
+#endif
 
 /**
  * @brief Node in backprop_dest linked list

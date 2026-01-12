@@ -157,6 +157,9 @@ static int cmd_mesh_fwd(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "");
     shell_print(sh, "=== Forwarding Table ===");
 
+    /* FIX: Add Mutex Lock */
+    k_mutex_lock(&gradient_srv.forwarding_table_mutex, K_FOREVER);
+
     int64_t now = k_uptime_get();
     bool has_entry = false;
 
@@ -176,6 +179,9 @@ static int cmd_mesh_fwd(const struct shell *sh, size_t argc, char **argv)
     if (!has_entry) {
         shell_print(sh, "(trong - chua co neighbor)");
     }
+
+    /* FIX: Add Mutex Unlock */
+    k_mutex_unlock(&gradient_srv.forwarding_table_mutex);
 
     shell_print(sh, "========================");
 
@@ -206,6 +212,9 @@ static int cmd_mesh_rrt(const struct shell *sh, size_t argc, char **argv)
 
     shell_print(sh, "");
     shell_print(sh, "=== Reverse Routing Table ===");
+
+    /* FIX: Add Mutex Lock */
+    k_mutex_lock(&gradient_srv.forwarding_table_mutex, K_FOREVER);
 
     int64_t now = k_uptime_get();
     int total_routes = 0;
@@ -248,6 +257,9 @@ static int cmd_mesh_rrt(const struct shell *sh, size_t argc, char **argv)
         shell_print(sh, "Tong: %d reverse routes", total_routes);
     }
 
+    /* FIX: Add Mutex Unlock */
+    k_mutex_unlock(&gradient_srv.forwarding_table_mutex);
+
     shell_print(sh, "=============================");
 
     return 0;
@@ -277,6 +289,9 @@ static int cmd_mesh_dest(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "");
     shell_print(sh, "=== Danh Sach Destination ===");
 
+    /* FIX: Add Mutex Lock */
+    k_mutex_lock(&gradient_srv.forwarding_table_mutex, K_FOREVER);
+
     int count = 0;
 
     for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
@@ -300,6 +315,9 @@ static int cmd_mesh_dest(const struct shell *sh, size_t argc, char **argv)
         shell_print(sh, "---");
         shell_print(sh, "Tong: %d destinations", count);
     }
+
+    /* FIX: Add Mutex Unlock */
+    k_mutex_unlock(&gradient_srv.forwarding_table_mutex);
 
     shell_print(sh, "=============================");
     shell_print(sh, "Dung: mesh backprop <dest> <payload>");
@@ -420,8 +438,12 @@ static int cmd_mesh_data(const struct shell *sh, size_t argc, char **argv)
         return -ENOEXEC;
     }
 
-    /* Kiểm tra có route không */
-    if (gradient_srv.forwarding_table[0].addr == BT_MESH_ADDR_UNASSIGNED) {
+    /* FIX: Protect read of forwarding_table */
+    k_mutex_lock(&gradient_srv.forwarding_table_mutex, K_FOREVER);
+    uint16_t nexthop = gradient_srv.forwarding_table[0].addr;
+    k_mutex_unlock(&gradient_srv.forwarding_table_mutex);
+
+    if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
         shell_error(sh, "Chua co route den Gateway!");
         shell_print(sh, "Cho nhan gradient beacon...");
         return -ENOEXEC;
@@ -434,8 +456,6 @@ static int cmd_mesh_data(const struct shell *sh, size_t argc, char **argv)
         shell_error(sh, "Payload khong hop le: %s", argv[1]);
         return -EINVAL;
     }
-
-    uint16_t nexthop = gradient_srv.forwarding_table[0].addr;
 
     shell_print(sh, "");
     shell_print(sh, "Gui DATA voi payload=%lu qua nexthop 0x%04x...",

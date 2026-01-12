@@ -10,7 +10,7 @@ menu "Nordic Bluetooth Mesh chat client sample"
 
 config BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE
     int "Forwarding table size"
-    default 8
+    default 25
     range 1 255
     help
       Maximum number of entries in the forwarding table.
@@ -85,6 +85,20 @@ config BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC
       Recommended: 3x HEARTBEAT_INTERVAL_SEC (default 90 = 3*30)
       This allows for occasional packet loss while still cleaning up
       routes to nodes that have gone offline.
+
+config BT_MESH_GRADIENT_SRV_RRT_MAX_DEST
+    int "Max reverse routes per neighbor"
+    default 50
+    range 5 500
+    help
+      Maximum number of destination nodes that can be stored in the 
+      Reverse Routing Table for a single immediate neighbor.
+      
+      For the Gateway (Sink Node), this value should be at least equal 
+      to the total number of nodes in the network, as one neighbor 
+      might be the next-hop for all other nodes.
+      
+      Impact: Higher values consume more heap memory (approx 16 bytes per entry).
 
 endmenu
 

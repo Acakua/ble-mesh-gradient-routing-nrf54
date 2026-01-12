@@ -113,7 +113,12 @@ static int handle_data_message(const struct bt_mesh_model *model,
     
     /* Nếu sender chưa có trong bảng, thêm vào forwarding table (mọi node đều làm, không chỉ gateway) */
     if (!sender_exists) {
-        uint8_t entry_gradient = (gradient_srv->gradient == 0) ? 254 : gradient_srv->gradient + 1;
+        /* 
+         * FIX: Use UINT8_MAX (255) for Gateway instead of 254.
+         * This indicates "Unknown Gradient" until a Beacon is received.
+         * For regular nodes, we still guess "my_gradient + 1".
+         */
+        uint8_t entry_gradient = (gradient_srv->gradient == 0) ? UINT8_MAX : gradient_srv->gradient + 1;
         LOG_INF("[Route Learn] Adding sender 0x%04x to forwarding table (gradient=%d)", sender_addr, entry_gradient);
         nt_update_sorted(gradient_srv->forwarding_table,
                          CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
@@ -127,9 +132,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
                            original_source,  /* dest = node that created the packet */
                            now);
     
-    /* Unlock forwarding table */
-    k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
-    
     if (err == 0) {
         LOG_INF("[Route Learn] Learned: dest=0x%04x via nexthop=0x%04x",
                 original_source, sender_addr);
@@ -139,6 +141,9 @@ static int handle_data_message(const struct bt_mesh_model *model,
     } else {
         LOG_ERR("[Route Learn] Failed to add route, err=%d", err);
     }
+
+    /* Unlock forwarding table */
+    k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
 
     /* If this is sink node, indicate reception and done */
     if (gradient_srv->gradient == 0) {
@@ -207,9 +212,11 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
         return 0;
     }
     
-    /* Check TTL - prevent infinite loops */
-    if (ttl <= BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL) {
-        LOG_WRN("[BACKPROP] TTL expired, dropping packet for dest=0x%04x", final_dest);
+    /* FIX: Strict check to ensure we have enough TTL to forward */
+    /* If current TTL is equal to or less than MIN+1, we stop here. */
+    if (ttl <= BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1) {
+        LOG_WRN("[BACKPROP] TTL expired (%d <= %d), dropping packet for dest=0x%04x", 
+                ttl, BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1, final_dest);
         return 0;
     }
     

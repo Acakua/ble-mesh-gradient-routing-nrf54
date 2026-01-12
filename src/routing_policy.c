@@ -16,10 +16,24 @@ bool rp_is_candidate_acceptable(int8_t rssi)
 
 bool rp_should_process_gradient(uint8_t received_grad, uint8_t my_grad)
 {
-	/* Preserve existing rule from handle_gradient_mesage:
-	 * if (msg > gradient_srv->gradient) { return 0; }
-	 */
-	return (received_grad <= my_grad);
+    /* 
+     * CHANGED: We must accept ALL valid gradient beacons to update the 
+     * Neighbor Table accurately. We need to know about:
+     * 1. Parents (lower gradient) -> for Uplink Routing
+     * 2. Children (higher gradient) -> for Reverse Routing (Downlink)
+     * 3. Peers (equal gradient) -> for redundancy
+     *
+     * The decision to *switch* our own gradient is handled separately 
+     * by `rp_should_update_my_gradient()`.
+     */
+
+    /* Ignore UINT8_MAX as it represents uninitialized/unknown state */
+    if (received_grad == UINT8_MAX) {
+        return false; 
+    }
+
+    /* Always process valid gradients to keep table fresh */
+    return true; 
 }
 
 bool rp_is_better(uint8_t new_grad, int8_t new_rssi, uint8_t old_grad, int8_t old_rssi)

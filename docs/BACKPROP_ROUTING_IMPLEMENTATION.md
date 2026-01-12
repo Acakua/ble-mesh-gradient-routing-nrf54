@@ -171,16 +171,21 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *srv, uint16_t data);
  *
  * LE = Little Endian (byte thấp trước)
  */
-static int data_send_internal(struct bt_mesh_gradient_srv *srv, 
-                              uint16_t data, 
+static int data_send_internal(struct bt_mesh_gradient_srv *srv,
+                              uint16_t data,
                               uint16_t original_source)
 {
-    /* Tìm nexthop từ forwarding table */
-    uint16_t nexthop = routing_policy_get_nexthop(srv->fwd_table);
-    if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+    /* Find best nexthop from forwarding table */
+    const neighbor_entry_t *best = nt_best(
+        (const neighbor_entry_t *)srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
+
+    if (best == NULL) {
         LOG_WRN("No route available");
-        return -ENOENT;
+        return -ENETUNREACH;
     }
+
+    uint16_t nexthop = best->addr;
 
     /* Chuẩn bị buffer cho message */
     BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_DATA, 4);
@@ -220,17 +225,78 @@ static int data_send_internal(struct bt_mesh_gradient_srv *srv,
  *                           │
  *                           └── Giữ nguyên src=C, không đổi thành B
  */
-int data_forward_send(struct bt_mesh_gradient_srv *srv, uint16_t data, 
-                      uint16_t original_source)
+int data_forward_send(struct bt_mesh_gradient_srv *srv, uint16_t data,
+                      uint16_t original_source, uint16_t sender_addr)
 {
     if (!srv) {
         return -EINVAL;
     }
 
-    LOG_DBG("Forwarding DATA: original_src=0x%04X, data=0x%04X", 
-            original_source, data);
+    /* Check if route is available */
+    const neighbor_entry_t *best = nt_best(
+        (const neighbor_entry_t *)srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
 
-    return data_send_internal(srv, data, original_source);
+    if (best == NULL) {
+        LOG_ERR("[Forward] No route available!");
+        return -ENETUNREACH;
+    }
+
+    /* FIX: Check if retry context is busy to prevent data race */
+    if (data_send_ctx.active) {
+        LOG_WRN("[Forward] System busy retrying previous packet, dropping new data %d", data);
+        return -EBUSY;
+    }
+
+    /* Indicate data forwarding */
+    led_indicate_data_forwarded();
+
+    /* Setup context for retry */
+    data_send_ctx.gradient_srv = srv;
+    data_send_ctx.data = data;
+    data_send_ctx.original_source = original_source;
+    data_send_ctx.sender_addr = sender_addr;
+    data_send_ctx.current_index = 0;
+    data_send_ctx.active = true;
+
+    /* Find first valid destination (skip sender) */
+    while (data_send_ctx.current_index < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
+        const neighbor_entry_t *entry = nt_get(
+            (const neighbor_entry_t *)srv->forwarding_table,
+            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+            data_send_ctx.current_index);
+
+        if (entry == NULL) {
+            LOG_ERR("[Forward] No valid destination!");
+            data_send_ctx.active = false;
+            return -ENETUNREACH;
+        }
+
+        uint16_t dest_addr = entry->addr;
+
+        if (dest_addr == sender_addr) {
+            data_send_ctx.current_index++;
+            continue;
+        }
+
+        LOG_INF("[Forward] Forwarding: original_src=0x%04x, data=%d, to=0x%04x (index %d)",
+                original_source, data, dest_addr, data_send_ctx.current_index);
+
+        int err = data_send_internal(srv, dest_addr, original_source, data);
+
+        if (err) {
+            LOG_ERR("[Forward] Failed to queue, err=%d", err);
+            data_send_ctx.current_index++;
+            continue;
+        }
+
+        return 0;
+    }
+
+    /* No valid destination found */
+    data_send_ctx.active = false;
+    LOG_ERR("[Forward] No valid destination found after checking all entries");
+    return -ENETUNREACH;
 }
 ```
 
@@ -258,13 +324,38 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *srv, uint16_t data)
         return -EINVAL;
     }
 
-    /* Lấy địa chỉ unicast của node hiện tại */
+    /* Get my own address as original_source (I am creating this packet) */
     uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
 
-    LOG_INF("DATA direct send: my_addr=0x%04X, data=0x%04X", my_addr, data);
+    /* Find best nexthop from forwarding table */
+    const neighbor_entry_t *best = nt_best(
+        (const neighbor_entry_t *)srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
 
-    /* Gọi internal với original_source = địa chỉ của chính mình */
-    return data_send_internal(srv, data, my_addr);
+    if (best == NULL) {
+        LOG_WRN("[Direct] No route available in forwarding table!");
+        return -ENETUNREACH;
+    }
+
+    /* FIX: Check if retry context is busy to prevent data race */
+    if (data_send_ctx.active) {
+        LOG_WRN("[Direct] System busy retrying previous packet, dropping new data %d", data);
+        return -EBUSY;
+    }
+
+    uint16_t nexthop = best->addr;
+
+    data_send_ctx.gradient_srv = srv;
+    data_send_ctx.data = data;
+    data_send_ctx.original_source = my_addr;
+    data_send_ctx.sender_addr = BT_MESH_ADDR_UNASSIGNED;
+    data_send_ctx.current_index = 0;
+    data_send_ctx.active = true;
+
+    LOG_INF("[Direct] Sending data %d with original_src=0x%04x to nexthop=0x%04x",
+            data, my_addr, nexthop);
+
+    return data_send_internal(srv, nexthop, my_addr, data);
 }
 ```
 
@@ -323,7 +414,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
         LOG_INF("Gateway received DATA from node 0x%04X: 0x%04X", 
                 original_source, data);
 
-        /* TODO (Prompt 3): Học reverse route từ packet này */
+        /* TODO (giai đoạn 3): Học reverse route từ packet này */
         /* rrt_add_dest(table, ctx->addr, original_source, k_uptime_get()); */
 
         /* Gọi callback để xử lý data (nếu có) */
@@ -338,7 +429,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
     LOG_DBG("Forwarding DATA: original_src=0x%04X, data=0x%04X", 
             original_source, data);
 
-    /* TODO (Prompt 3): Học reverse route từ packet này */
+    /* TODO (giai đoạn 3): Học reverse route từ packet này */
     /* rrt_add_dest(table, ctx->addr, original_source, k_uptime_get()); */
 
     /* Forward packet, GIỮ NGUYÊN original_source */
@@ -427,12 +518,12 @@ Gateway biết:
 
 #### 1.7. Kết Quả
 
-Sau khi implement Prompt 1:
+Sau khi implement giai đoạn 1:
 
 ✅ Mỗi DATA packet mang theo địa chỉ của node tạo ra nó  
 ✅ Các node trung gian giữ nguyên `original_source` khi forward  
 ✅ Gateway biết chính xác packet xuất phát từ node nào  
-✅ Chuẩn bị sẵn sàng cho Prompt 3: học reverse route từ `original_source`
+✅ Chuẩn bị sẵn sàng cho giai đoạn 3: học reverse route từ `original_source`
 
 ---
 
@@ -448,7 +539,7 @@ Sau khi implement Prompt 1:
 
 ---
 
-### PROMPT 2: Tạo Cấu Trúc Reverse Routing Table (RRT)
+### giai đoạn 2: Tạo Cấu Trúc Reverse Routing Table (RRT)
 
 ---
 
@@ -796,58 +887,99 @@ static bool remove_dest_from_entry(neighbor_entry_t *entry, uint16_t dest)
 }
 
 /**
- * @brief Thêm hoặc cập nhật destination
+ * @brief Thêm hoặc cập nhật destination (FIXED: Allocate-before-remove)
+ *
+ * @param table     Con trỏ đến forwarding table
+ * @param table_size Kích thước của forwarding table
+ * @param nexthop   Địa chỉ của nexthop
+ * @param dest      Địa chỉ destination
+ * @param timestamp Timestamp hiện tại
+ *
+ * @return 0 nếu thành công, negative error code nếu thất bại
+ *
+ * Logic xử lý:
+ * 1. Tìm neighbor entry cho nexthop
+ * 2. Nếu dest đã tồn tại ở nexthop này: update timestamp
+ * 3. Nếu dest tồn tại ở nexthop khác: Move operation (ALLOCATE FIRST)
+ * 4. Nếu dest chưa tồn tại: Add operation
+ *
+ * FIX: Allocate memory FIRST before removing old entries to prevent data loss
  */
-int rrt_add_dest(neighbor_entry_t *table, uint16_t nexthop,
-                 uint16_t dest, int64_t timestamp)
+int rrt_add_dest(void *table, size_t table_size,
+                 uint16_t nexthop_addr, uint16_t dest_addr, int64_t timestamp)
 {
     if (!table) {
         return -EINVAL;
     }
 
-    /* Tìm neighbor entry cho nexthop */
-    neighbor_entry_t *entry = find_neighbor(table, nexthop);
-    if (!entry) {
-        LOG_WRN("Nexthop 0x%04X not in forwarding table", nexthop);
-        return -ENOENT;
-    }
+    neighbor_entry_t *ft = (neighbor_entry_t *)table;
+    neighbor_entry_t *target_entry = NULL;
 
-    /* Bước 1: Kiểm tra dest đã tồn tại ở nexthop KHÁC chưa */
-    for (int i = 0; i < FWD_TABLE_SIZE; i++) {
-        if (&table[i] != entry) {
-            /* Đây là neighbor khác */
-            if (remove_dest_from_entry(&table[i], dest)) {
-                LOG_INF("RRT: Moved dest 0x%04X from neighbor 0x%04X to 0x%04X",
-                        dest, table[i].addr, nexthop);
-            }
+    /* 1. Find target neighbor entry */
+    for (size_t i = 0; i < table_size; i++) {
+        if (ft[i].addr == nexthop_addr) {
+            target_entry = &ft[i];
+            break;
         }
     }
 
-    /* Bước 2: Kiểm tra dest đã tồn tại ở nexthop NÀY chưa */
-    backprop_node_t *curr = entry->backprop_dest;
+    if (!target_entry) {
+        LOG_WRN("[RRT] Nexthop 0x%04x not in forwarding table", nexthop_addr);
+        return -ENOENT;
+    }
+
+    /* 2. Check if destination already exists at this nexthop */
+    backprop_node_t *curr = target_entry->backprop_dest;
     while (curr) {
-        if (curr->addr == dest) {
-            /* Đã tồn tại - chỉ update timestamp */
+        if (curr->addr == dest_addr) {
+            /* Already exists - just update timestamp */
             curr->last_seen = timestamp;
-            LOG_DBG("RRT: Updated dest 0x%04X via 0x%04X", dest, nexthop);
+            LOG_DBG("[RRT] Updated dest 0x%04x via nexthop 0x%04x", dest_addr, nexthop_addr);
             return 0;
         }
         curr = curr->next;
     }
 
-    /* Bước 3: Dest chưa tồn tại - tạo node mới */
-    backprop_node_t *new_node = k_malloc(sizeof(backprop_node_t));
-    if (!new_node) {
-        LOG_ERR("RRT: Failed to allocate memory for dest 0x%04X", dest);
-        return -ENOMEM;
+    /* Ensure it doesn't exist elsewhere (duplicate cleanup) */
+    for (size_t i = 0; i < table_size; i++) {
+         if (&ft[i] != target_entry && ft[i].addr != 0) {
+             if (remove_dest_from_list(&ft[i].backprop_dest, dest_addr)) {
+                 LOG_WRN("[RRT] Fixed duplicate dest 0x%04x (removed from 0x%04x)", dest_addr, ft[i].addr);
+             }
+         }
     }
 
-    new_node->addr = dest;
-    new_node->last_seen = timestamp;
-    new_node->next = entry->backprop_dest;  /* Insert ở đầu list */
-    entry->backprop_dest = new_node;
+    /* 3. It's a Move or New Add. ALLOCATE FIRST to prevent data loss. */
+    backprop_node_t *new_node = k_malloc(sizeof(backprop_node_t));
+    if (new_node == NULL) {
+        LOG_ERR("[RRT] Failed to allocate memory for backprop node. Keeping old route if any.");
+        return -ENOMEM; /* Abort before deleting anything */
+    }
 
-    LOG_INF("RRT: Added dest 0x%04X via nexthop 0x%04X", dest, nexthop);
+    /* 4. Now safe to remove from old location (Move operation) */
+    for (size_t i = 0; i < table_size; i++) {
+        if (ft[i].addr != nexthop_addr && ft[i].addr != 0) {
+            if (remove_dest_from_list(&ft[i].backprop_dest, dest_addr)) {
+                LOG_INF("[RRT] Dest 0x%04x moved from nexthop 0x%04x to 0x%04x",
+                        dest_addr, ft[i].addr, nexthop_addr);
+                break; /* Can only exist in one place */
+            }
+        }
+    }
+
+    /* 5. Check limits and insert */
+    size_t count = count_list(target_entry->backprop_dest);
+    if (count >= RRT_MAX_DEST_PER_NEXTHOP) {
+        LOG_WRN("[RRT] Max destinations reached for nexthop 0x%04x, removing oldest", nexthop_addr);
+        remove_oldest_from_list(&target_entry->backprop_dest);
+    }
+
+    new_node->addr = dest_addr;
+    new_node->last_seen = timestamp;
+    new_node->next = target_entry->backprop_dest;
+    target_entry->backprop_dest = new_node;
+
+    LOG_INF("[RRT] Added dest 0x%04x via nexthop 0x%04x", dest_addr, nexthop_addr);
     return 0;
 }
 
@@ -1240,14 +1372,14 @@ Route đến Node C được cập nhật tự động!
 
 #### 2.8. Kết Quả
 
-Sau khi implement Prompt 2:
+Sau khi implement giai đoạn 2:
 
 ✅ Có cấu trúc dữ liệu để lưu reverse routes  
 ✅ API đầy đủ: add, remove, find, cleanup, print  
 ✅ Xử lý route thay đổi (di chuyển destination giữa các nexthop)  
 ✅ Quản lý memory động với k_malloc/k_free  
 ✅ Tích hợp với forwarding table có sẵn  
-✅ Sẵn sàng cho Prompt 3: populate RRT khi nhận DATA
+✅ Sẵn sàng cho giai đoạn 3: populate RRT khi nhận DATA
 
 ---
 
@@ -1273,13 +1405,13 @@ Sau khi implement Prompt 2:
 
 ---
 
-### PROMPT 3: Implement Route Learning Từ DATA Packets
+### giai đoạn 3: Implement Route Learning Từ DATA Packets
 
 ---
 
 #### 3.1. Mục Tiêu
 
-Implement logic tự động học reverse route mỗi khi nhận được DATA packet. Đây là bước "kết nối" giữa Prompt 1 (DATA mang `original_source`) và Prompt 2 (cấu trúc RRT) - biến thông tin trong packet thành entry trong RRT.
+Implement logic tự động học reverse route mỗi khi nhận được DATA packet. Đây là bước "kết nối" giữa giai đoạn 1 (DATA mang `original_source`) và giai đoạn 2 (cấu trúc RRT) - biến thông tin trong packet thành entry trong RRT.
 
 ---
 
@@ -1358,7 +1490,7 @@ Bước 4: Gateway nhận: sender=0x0002 (A), original_source=0x0004 (C)
 #include "reverse_routing.h"
 ```
 
-**Sửa hàm `handle_data_message()`:**
+**Sửa hàm `handle_data_message()` (ĐÃ CẬP NHẬT VỚI FIXES):**
 
 ```c
 /**
@@ -1371,88 +1503,109 @@ static int handle_data_message(const struct bt_mesh_model *model,
                                struct bt_mesh_msg_ctx *ctx,
                                struct net_buf_simple *buf)
 {
-    struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+    struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
 
-    /* Kiểm tra độ dài packet */
-    if (buf->len < 4) {
-        LOG_ERR("DATA packet too short: %d bytes", buf->len);
-        return -EINVAL;
-    }
-
-    /* Parse packet */
+    uint16_t sender_addr = ctx->addr;  /* Immediate sender (1-hop neighbor) */
+    int8_t rssi = ctx->recv_rssi;      /* RSSI of this packet */
+    
+    /* Read packet: [original_source: 2 bytes] + [data: 2 bytes] */
     uint16_t original_source = net_buf_simple_pull_le16(buf);
-    uint16_t data = net_buf_simple_pull_le16(buf);
+    uint16_t received_data = net_buf_simple_pull_le16(buf);
 
-    LOG_INF("DATA received: sender=0x%04X, original_src=0x%04X, data=0x%04X",
-            ctx->addr, original_source, data);
+    LOG_INF("Received DATA: original_src=0x%04x, sender=0x%04x, data=%d", 
+            original_source, sender_addr, received_data);
 
-    /*
-     * ╔═══════════════════════════════════════════════════════════════╗
-     * ║                    ROUTE LEARNING (MỚI)                       ║
-     * ╠═══════════════════════════════════════════════════════════════╣
-     * ║ Học reverse route: "Để đến original_source, gửi qua sender"   ║
-     * ║                                                               ║
-     * ║ Ví dụ: Nhận packet từ B với original_source = C               ║
-     * ║        → Lưu: Đến C, gửi qua B                                ║
-     * ╚═══════════════════════════════════════════════════════════════╝
-     */
-    int err = rrt_add_dest(srv->fwd_table,    /* Forwarding table */
-                           ctx->addr,          /* nexthop = sender */
-                           original_source,    /* destination */
-                           k_uptime_get());    /* timestamp hiện tại */
+    /* ============================================================
+     * Reverse Route Learning
+     * 
+     * When receiving DATA from sender_addr with original_source:
+     * → Learn: "To reach original_source, send via sender_addr"
+     * 
+     * Special case for Gateway (gradient=0):
+     * - Gateway doesn't add higher-gradient nodes to forwarding table
+     *   (because it only needs routes TO lower gradient, not FROM higher)
+     * - But Gateway DOES need to learn reverse routes for BACKPROP
+     * - Solution: Add sender to forwarding table with high gradient (UINT8_MAX)
+     *   so it doesn't affect uplink routing but enables reverse route learning
+     * ============================================================ */
+    
+    int64_t now = k_uptime_get();
+    
+    /* First, ensure sender is in forwarding table (for RRT to work) */
+    /* Lock forwarding table for thread-safe access */
+    k_mutex_lock(&gradient_srv->forwarding_table_mutex, K_FOREVER);
+    
+    /* Check if sender already exists */
+    bool sender_exists = false;
+    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+        if (gradient_srv->forwarding_table[i].addr == sender_addr) {
+            sender_exists = true;
+            /* Update last_seen */
+            gradient_srv->forwarding_table[i].last_seen = now;
+            break;
+        }
+    }
 
+    /* Nếu sender chưa có trong bảng, thêm vào forwarding table (mọi node đều làm, không chỉ gateway) */
+    if (!sender_exists) {
+        /* 
+         * FIX: Use UINT8_MAX (255) for Gateway instead of 254.
+         * This indicates "Unknown Gradient" until a Beacon is received.
+         * For regular nodes, we still guess "my_gradient + 1".
+         */
+        uint8_t entry_gradient = (gradient_srv->gradient == 0) ? UINT8_MAX : gradient_srv->gradient + 1;
+        LOG_INF("[Route Learn] Adding sender 0x%04x to forwarding table (gradient=%d)", sender_addr, entry_gradient);
+        nt_update_sorted(gradient_srv->forwarding_table,
+                         CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                         sender_addr, entry_gradient, rssi, now);
+    }
+    
+    /* Now learn the reverse route */
+    int err = rrt_add_dest(gradient_srv->forwarding_table,
+                           CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                           sender_addr,      /* nexthop = node that just sent to us */
+                           original_source,  /* dest = node that created the packet */
+                           now);
+    
     if (err == 0) {
-        LOG_DBG("Learned route: to 0x%04X via 0x%04X",
-                original_source, ctx->addr);
+        LOG_INF("[Route Learn] Learned: dest=0x%04x via nexthop=0x%04x",
+                original_source, sender_addr);
     } else if (err == -ENOENT) {
-        /*
-         * Sender không có trong forwarding table.
-         * Điều này có thể xảy ra nếu:
-         * 1. Sender là node mới chưa được thêm vào table
-         * 2. Entry của sender đã bị expired và xóa
-         *
-         * Trong cả hai trường hợp, bỏ qua việc học route.
-         * Route sẽ được học lần sau khi sender có trong table.
-         */
-        LOG_WRN("Cannot learn route: sender 0x%04X not in fwd table",
-                ctx->addr);
+        LOG_WRN("[Route Learn] Nexthop 0x%04x not in forwarding table, skip learning",
+                sender_addr);
     } else {
-        LOG_ERR("Failed to learn route: err=%d", err);
+        LOG_ERR("[Route Learn] Failed to add route, err=%d", err);
     }
 
-    /* Kiểm tra heartbeat marker */
-    bool is_heartbeat = (data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER);
-    if (is_heartbeat) {
-        LOG_DBG("Heartbeat from 0x%04X", original_source);
-    }
+    /* Unlock forwarding table */
+    k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
 
-    /* Xử lý dựa trên gradient */
-    if (srv->gradient == 0) {
-        /*
-         * Đây là Gateway - đích cuối cùng của DATA
-         */
-        LOG_INF("Gateway received %s from node 0x%04X: 0x%04X",
-                is_heartbeat ? "heartbeat" : "data",
-                original_source, data);
-
-        /* In RRT để debug (chỉ trên Gateway) */
-        if (!is_heartbeat) {
-            rrt_print_table(srv->fwd_table);
+    /* If this is sink node, indicate reception and done */
+    if (gradient_srv->gradient == 0) {
+        led_indicate_sink_received();
+        
+        /* Check if this is a heartbeat or real data */
+        if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
+            LOG_INF("[Sink] Heartbeat received from 0x%04x (via 0x%04x)",
+                    original_source, sender_addr);
+        } else {
+            LOG_INF("[Sink] Data received: %d from original source 0x%04x (via 0x%04x)", 
+                    received_data, original_source, sender_addr);
         }
-
-        /* Gọi callback nếu có (và không phải heartbeat) */
-        if (!is_heartbeat && srv->handlers && srv->handlers->start) {
-            /* Có thể thêm callback riêng cho data received */
-        }
-
+        
+        /* Debug: Print reverse routing table on Gateway */
+        rrt_print_table(gradient_srv->forwarding_table,
+                        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
         return 0;
     }
-
-    /*
-     * Không phải Gateway - forward packet lên
-     */
-    LOG_DBG("Forwarding DATA to next hop");
-    return data_forward_send(srv, data, original_source);
+    
+    /* Forward data towards sink - keep original_source unchanged */
+    err = data_forward_send(gradient_srv, received_data, original_source, sender_addr);
+    if (err) {
+        LOG_ERR("[Forward] Failed to forward data, err=%d", err);
+    }
+    
+    return 0;
 }
 ```
 
@@ -1765,7 +1918,7 @@ if (is_heartbeat) {
 
 #### 3.8. Kết Quả
 
-Sau khi implement Prompt 3:
+Sau khi implement giai đoạn 3:
 
 ✅ Route được học tự động khi nhận DATA packet  
 ✅ Tất cả nodes trên đường đi đều học được reverse route  
@@ -1773,7 +1926,7 @@ Sau khi implement Prompt 3:
 ✅ Route thay đổi tự động khi path thay đổi  
 ✅ Xử lý được các edge cases (sender không trong table, heartbeat)  
 ✅ Gateway có thể in RRT để debug  
-✅ Sẵn sàng cho Prompt 4: Sử dụng RRT để gửi BACKPROP
+✅ Sẵn sàng cho giai đoạn 4: Sử dụng RRT để gửi BACKPROP
 
 ---
 
@@ -1797,11 +1950,11 @@ Sau khi implement Prompt 3:
 4. **Memory Consideration:**
    - Mỗi DATA packet có thể tạo 1 RRT entry
    - Với nhiều nodes gửi thường xuyên, RRT có thể lớn
-   - Cleanup mechanism (Prompt 6) sẽ xóa entries cũ
+   - Cleanup mechanism (giai đoạn 6) sẽ xóa entries cũ
 
 ---
 
-### PROMPT 4: Tạo BACKPROP_DATA Packet và Handler
+### giai đoạn 4: Tạo BACKPROP_DATA Packet và Handler
 
 ---
 
@@ -2053,18 +2206,17 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     }
 
     /*
-     * Bước 3: Kiểm tra TTL
+     * Bước 3: Kiểm tra TTL (ĐÃ FIX: Strict check để tránh underflow)
      */
-    if (ttl <= BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL) {
+    if (ttl <= BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1) {
         /*
          * TTL quá thấp - drop packet để tránh loop
          *
-         * Đây có thể là:
-         * 1. Loop đã xảy ra và TTL đã giảm đến mức tối thiểu
-         * 2. Destination quá xa (>10 hops với default TTL)
+         * FIX: Kiểm tra ttl <= MIN_TTL + 1 để đảm bảo sau khi decrement,
+         * TTL vẫn còn valid (>= MIN_TTL) cho next hop.
          */
-        LOG_WRN("BACKPROP dropped: TTL expired (ttl=%d, dest=0x%04X)",
-                ttl, final_dest);
+        LOG_WRN("[BACKPROP] TTL expired (%d <= %d), dropping packet for dest=0x%04x", 
+                ttl, BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1, final_dest);
         return -ETIMEDOUT;
     }
 
@@ -2527,7 +2679,7 @@ if (err == -ENOENT) {
 
 #### 4.8. Kết Quả
 
-Sau khi implement Prompt 4:
+Sau khi implement giai đoạn 4:
 
 ✅ Có opcode mới cho BACKPROP_DATA (0x0C)  
 ✅ Packet format: [dest:2] + [ttl:1] + [payload:2] = 5 bytes  
@@ -2564,7 +2716,7 @@ Sau khi implement Prompt 4:
 
 ---
 
-### PROMPT 5: Implement Heartbeat Mechanism
+### giai đoạn 5: Implement Heartbeat Mechanism
 
 ---
 
@@ -3533,7 +3685,7 @@ T=30s    Gateway đã có routes đến tất cả nodes
 
 #### 5.9. Kết Quả
 
-Sau khi implement Prompt 5:
+Sau khi implement giai đoạn 5:
 
 ✅ Heartbeat module với API đầy đủ  
 ✅ Nodes gửi heartbeat mỗi 30 giây (configurable)  
@@ -3583,7 +3735,7 @@ Sau khi implement Prompt 5:
 
 ---
 
-### PROMPT 6: Cleanup và Integration
+### giai đoạn 6: Cleanup và Integration
 
 ---
 
@@ -3657,7 +3809,7 @@ Với cleanup:
 
 ##### 6.3.1. File `Kconfig`
 
-**Mục đích:** Thêm config option cho RRT timeout.
+**Mục đích:** Thêm config options cho RRT timeout và capacity.
 
 ```kconfig
 config BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC
@@ -3674,6 +3826,20 @@ config BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC
       Cho phép miss 2 heartbeat trước khi xóa route.
       
       Giá trị mặc định: 90 giây (3 × 30 giây heartbeat)
+
+config BT_MESH_GRADIENT_SRV_RRT_MAX_DEST
+    int "Max reverse routes per neighbor"
+    default 50
+    range 5 500
+    help
+      Maximum number of destination nodes that can be stored in the 
+      Reverse Routing Table for a single immediate neighbor.
+      
+      For the Gateway (Sink Node), this value should be at least equal 
+      to the total number of nodes in the network, as one neighbor 
+      might be the next-hop for all other nodes.
+      
+      Impact: Higher values consume more heap memory (approx 16 bytes per entry).
 ```
 
 ---
@@ -3742,7 +3908,7 @@ int rrt_get_any_destination(neighbor_entry_t *table, uint16_t *out_dest)
 }
 ```
 
-**Hàm `rrt_cleanup_expired()` (đã implement từ Prompt 2, review lại):**
+**Hàm `rrt_cleanup_expired()` (đã implement từ giai đoạn 2, review lại):**
 
 ```c
 /**
@@ -3826,57 +3992,142 @@ void rrt_cleanup_expired(neighbor_entry_t *table, int64_t timeout_ms)
  *
  * Chạy mỗi CLEANUP_INTERVAL (15 giây) để:
  * 1. Xóa neighbors expired trong Forwarding Table
- * 2. Xóa routes expired trong RRT (MỚI)
+ * 2. Xóa routes expired trong RRT
+ * 3. Cập nhật gradient dựa trên best parent còn lại
+ * 4. Deferred publication để tránh deadlock
  */
 static void cleanup_handler(struct k_work *work)
 {
-    struct bt_mesh_gradient_srv *srv =
-        CONTAINER_OF(work, struct bt_mesh_gradient_srv, cleanup_work.work);
-
-    /*
-     * Cleanup Forwarding Table
-     * (Code hiện có)
-     */
-    int64_t now = k_uptime_get();
-    int64_t fwd_timeout = CONFIG_BT_MESH_GRADIENT_SRV_FWD_TABLE_TIMEOUT_SEC * 1000LL;
-
-    for (int i = 0; i < FWD_TABLE_SIZE; i++) {
-        neighbor_entry_t *entry = &srv->fwd_table[i];
-        if (entry->addr == BT_MESH_ADDR_UNASSIGNED) {
+    if (g_gradient_srv == NULL) {
+        return;
+    }
+    
+    int64_t current_time = k_uptime_get();
+    bool table_changed = false;
+    bool should_publish = false;  // Flag to defer publication
+    
+    LOG_DBG("[Cleanup] Running cleanup check...");
+    
+    /* Lock forwarding table for thread-safe access */
+    k_mutex_lock(&g_gradient_srv->forwarding_table_mutex, K_FOREVER);
+    
+    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+        const neighbor_entry_t *entry = nt_get(
+            (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
+            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+            i);
+        
+        if (entry == NULL) {
             continue;
         }
-
-        int64_t age = now - entry->last_seen;
-        if (age > fwd_timeout) {
-            LOG_INF("Cleanup: Removing neighbor 0x%04X (age: %lld ms)",
-                    entry->addr, age);
-
-            /* Clear RRT entries cho neighbor này trước khi xóa */
-            rrt_clear_entry(entry);
-
-            /* Reset entry */
-            entry->addr = BT_MESH_ADDR_UNASSIGNED;
-            entry->gradient = 0;
-            entry->last_seen = 0;
+        
+        if (nt_is_expired(
+                (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
+                CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                i, current_time, CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS)) {
+            
+            LOG_WRN("[Cleanup] Node 0x%04x expired (last seen %lld ms ago)",
+                    entry->addr, current_time - entry->last_seen);
+            
+            /* Free backprop_dest linked list before removing entry */
+            rrt_clear_entry(
+                (void *)g_gradient_srv->forwarding_table,
+                CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                i);
+            
+            uint16_t removed_addr = nt_remove(
+                (neighbor_entry_t *)g_gradient_srv->forwarding_table,
+                CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                i);
+            
+            if (removed_addr != GR_ADDR_UNASSIGNED) {
+                LOG_INF("[Forwarding] Removed 0x%04x from index %d", removed_addr, i);
+                table_changed = true;
+                i--;  /* Re-check this index since entries shifted */
+            }
         }
     }
 
-    /*
-     * ╔═══════════════════════════════════════════════════════════════╗
-     * ║              RRT CLEANUP (MỚI)                                ║
-     * ╠═══════════════════════════════════════════════════════════════╣
-     * ║ Xóa các route entries expired trong RRT                       ║
-     * ║ Timeout từ Kconfig: RRT_TIMEOUT_SEC                           ║
-     * ╚═══════════════════════════════════════════════════════════════╝
-     */
-    int64_t rrt_timeout = CONFIG_BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC * 1000LL;
-    rrt_cleanup_expired(srv->fwd_table, rrt_timeout);
+    /* ========================================
+     * Cleanup reverse routing table
+     * ======================================== */
+    int64_t rrt_timeout_ms = CONFIG_BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC * 1000LL;
+    int rrt_removed = rrt_cleanup_expired(
+        g_gradient_srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+        current_time,
+        rrt_timeout_ms);
+    
+    if (rrt_removed > 0) {
+        LOG_INF("[Cleanup] RRT: Removed %d expired reverse routes", rrt_removed);
+    }
 
-    /*
-     * Reschedule cleanup
-     */
-    k_work_schedule(&srv->cleanup_work,
-                    K_SECONDS(CONFIG_BT_MESH_GRADIENT_SRV_CLEANUP_INTERVAL_SEC));
+    /* Update gradient based on best remaining parent */
+    if (table_changed) {
+#ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
+        /* Sink node (Gateway) always has gradient=0, never update */
+        LOG_DBG("[Cleanup] Sink node, gradient fixed at 0");
+#else
+        const neighbor_entry_t *best = nt_best(
+            (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
+            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
+
+        if (best != NULL) {
+            uint8_t best_parent_gradient = best->gradient;
+
+            if (best_parent_gradient != UINT8_MAX) {
+                uint8_t old_gradient = g_gradient_srv->gradient;
+                uint8_t new_gradient = rp_compute_new_gradient(best_parent_gradient);
+                
+                /* Safety: Regular nodes cannot have gradient=0 */
+                if (new_gradient == 0) {
+                    new_gradient = 1;
+                }
+                
+                g_gradient_srv->gradient = new_gradient;
+
+                LOG_INF("[Cleanup] Gradient updated: [%d] -> [%d]",
+                    old_gradient, g_gradient_srv->gradient);
+
+                /* Notify heartbeat module of gradient change */
+                heartbeat_update_gradient(g_gradient_srv->gradient);
+
+                /* DEFER PUBLICATION */
+                should_publish = true;
+            }
+        } else {
+            LOG_WRN("[Cleanup] No parents available, resetting gradient to 255");
+            g_gradient_srv->gradient = UINT8_MAX;
+            /* Notify heartbeat module of gradient change */
+            heartbeat_update_gradient(g_gradient_srv->gradient);
+            /* DEFER PUBLICATION */
+            should_publish = true;
+        }
+#endif
+        
+        LOG_INF("[Cleanup] Forwarding table after cleanup:");
+        for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+            const neighbor_entry_t *entry = nt_get(
+                (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
+                CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                i);
+            
+            if (entry != NULL) {
+                LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
+                        i, entry->addr, entry->gradient, entry->rssi);
+            }
+        }
+    }
+
+    /* Unlock forwarding table */
+    k_mutex_unlock(&g_gradient_srv->forwarding_table_mutex);
+
+    /* EXECUTE PUBLICATION SAFELY */
+    if (should_publish) {
+        bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+    }
+
+    k_work_schedule(&cleanup_work, K_MSEC(CLEANUP_INTERVAL_MS));
 }
 ```
 
@@ -4251,7 +4502,7 @@ Timeline:
 
 #### 6.7. Kết Quả
 
-Sau khi implement Prompt 6:
+Sau khi implement giai đoạn 6:
 
 ✅ RRT cleanup tự động mỗi 15 giây  
 ✅ Routes expired (>90s) bị xóa  

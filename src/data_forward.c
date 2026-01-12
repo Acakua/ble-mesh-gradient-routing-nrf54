@@ -178,6 +178,12 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
         return -ENETUNREACH;
     }
     
+    /* FIX: Check if retry context is busy */
+    if (data_send_ctx.active) {
+        LOG_WRN("[Forward] System busy retrying previous packet, dropping new data %d", data);
+        return -EBUSY;
+    }
+
     /* Indicate data forwarding */
     led_indicate_data_forwarded();
     
@@ -242,6 +248,12 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     if (best == NULL) {
         LOG_WRN("[Direct] No route available in forwarding table!");
         return -ENETUNREACH;
+    }
+    
+    /* FIX: Check if retry context is busy */
+    if (data_send_ctx.active) {
+        LOG_WRN("[Direct] System busy retrying previous packet, dropping new data %d", data);
+        return -EBUSY;
     }
     
     uint16_t nexthop = best->addr;
