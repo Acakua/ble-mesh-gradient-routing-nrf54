@@ -3,6 +3,7 @@
 
 #include <zephyr/bluetooth/mesh.h>
 #include <bluetooth/mesh/model_types.h>
+#include "gradient_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,17 +48,11 @@ extern "C" {
 #endif
 
 /**
- * @brief Forward declaration for backprop_node (defined in reverse_routing.h)
+ * @brief Forwarding table context - alias to neighbor_entry_t
+ * 
+ * Uses neighbor_entry_t from gradient_types.h for consistency across modules.
  */
-struct backprop_node;
-
-typedef struct bt_mesh_gradient_srv_forwarding_ctx{
-	uint16_t addr;
-	int8_t rssi;
-	uint8_t gradient;
-	int64_t last_seen;
-	struct backprop_node *backprop_dest; /**< Linked list of reachable destinations (for reverse routing) */
-} bt_mesh_gradient_srv_forwarding_ctx;
+typedef neighbor_entry_t bt_mesh_gradient_srv_forwarding_ctx;
 
 /* Forward declaration of the Bluetooth Mesh Chat Client model context. */
 struct bt_mesh_gradient_srv;
@@ -113,6 +108,9 @@ struct bt_mesh_gradient_srv {
 	const struct bt_mesh_gradient_srv_handlers *handlers;
 
 	uint8_t gradient;
+
+	/** Mutex to protect forwarding table access */
+	struct k_mutex forwarding_table_mutex;
 
 	bt_mesh_gradient_srv_forwarding_ctx
 		forwarding_table[

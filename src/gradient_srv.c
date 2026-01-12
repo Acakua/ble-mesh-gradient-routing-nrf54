@@ -68,6 +68,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
 {
     struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
     uint16_t sender_addr = ctx->addr;  /* Immediate sender (1-hop neighbor) */
+    int8_t rssi = ctx->recv_rssi;      /* RSSI of this packet */
     
     /* Read packet: [original_source: 2 bytes] + [data: 2 bytes] */
     uint16_t original_source = net_buf_simple_pull_le16(buf);
@@ -81,23 +82,59 @@ static int handle_data_message(const struct bt_mesh_model *model,
      * 
      * When receiving DATA from sender_addr with original_source:
      * → Learn: "To reach original_source, send via sender_addr"
+     * 
+     * Special case for Gateway (gradient=0):
+     * - Gateway doesn't add higher-gradient nodes to forwarding table
+     *   (because it only needs routes TO lower gradient, not FROM higher)
+     * - But Gateway DOES need to learn reverse routes for BACKPROP
+     * - Solution: Add sender to forwarding table with high gradient (254)
+     *   so it doesn't affect uplink routing but enables reverse route learning
      * ============================================================ */
     
-    /* Only learn if sender_addr exists in forwarding table (valid neighbor) */
     int64_t now = k_uptime_get();
+    
+    /* First, ensure sender is in forwarding table (for RRT to work) */
+    /* Lock forwarding table for thread-safe access */
+    k_mutex_lock(&gradient_srv->forwarding_table_mutex, K_FOREVER);
+    
+    /* Check if sender already exists */
+    bool sender_exists = false;
+    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+        if (gradient_srv->forwarding_table[i].addr == sender_addr) {
+            sender_exists = true;
+            /* Update last_seen */
+            gradient_srv->forwarding_table[i].last_seen = now;
+            break;
+        }
+    }
+
+    /* DEBUG: Log giá trị gradient trước khi thêm sender */
+    LOG_INF("[DEBUG] My gradient before add sender: %d", gradient_srv->gradient);
+    
+    /* Nếu sender chưa có trong bảng, thêm vào forwarding table (mọi node đều làm, không chỉ gateway) */
+    if (!sender_exists) {
+        uint8_t entry_gradient = (gradient_srv->gradient == 0) ? 254 : gradient_srv->gradient + 1;
+        LOG_INF("[Route Learn] Adding sender 0x%04x to forwarding table (gradient=%d)", sender_addr, entry_gradient);
+        nt_update_sorted(gradient_srv->forwarding_table,
+                         CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                         sender_addr, entry_gradient, rssi, now);
+    }
+    
+    /* Now learn the reverse route */
     int err = rrt_add_dest(gradient_srv->forwarding_table,
                            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
                            sender_addr,      /* nexthop = node that just sent to us */
                            original_source,  /* dest = node that created the packet */
                            now);
     
+    /* Unlock forwarding table */
+    k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
+    
     if (err == 0) {
         LOG_INF("[Route Learn] Learned: dest=0x%04x via nexthop=0x%04x",
                 original_source, sender_addr);
     } else if (err == -ENOENT) {
-        /* sender_addr not in forwarding table - possibly new node
-         * or haven't received gradient from this node yet. Cannot learn route. */
-        LOG_DBG("[Route Learn] Nexthop 0x%04x not in forwarding table, skip learning",
+        LOG_WRN("[Route Learn] Nexthop 0x%04x not in forwarding table, skip learning",
                 sender_addr);
     } else {
         LOG_ERR("[Route Learn] Failed to add route, err=%d", err);
@@ -274,6 +311,9 @@ static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model)
                       sizeof(gradient_srv->buf));
     gradient_srv->pub.msg = &gradient_srv->pub_msg;
     gradient_srv->pub.update = bt_mesh_gradient_srv_update_handler;
+
+    /* Initialize mutex for forwarding table protection */
+    k_mutex_init(&gradient_srv->forwarding_table_mutex);
 
     /* Initialize all sub-modules */
     led_indication_init();

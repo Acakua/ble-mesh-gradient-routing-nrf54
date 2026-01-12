@@ -234,6 +234,18 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     /* Get my own address as original_source (I am creating this packet) */
     uint16_t my_addr = bt_mesh_model_elem(gradient_srv->model)->rt->addr;
     
+    /* Find best nexthop from forwarding table (ignore addr parameter for heartbeat) */
+    const neighbor_entry_t *best = nt_best(
+        (const neighbor_entry_t *)gradient_srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
+    
+    if (best == NULL) {
+        LOG_WRN("[Direct] No route available in forwarding table!");
+        return -ENETUNREACH;
+    }
+    
+    uint16_t nexthop = best->addr;
+    
     data_send_ctx.gradient_srv = gradient_srv;
     data_send_ctx.data = data;
     data_send_ctx.original_source = my_addr;
@@ -241,8 +253,8 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     data_send_ctx.current_index = 0;
     data_send_ctx.active = true;
     
-    LOG_INF("[Direct] Sending data %d with original_src=0x%04x to 0x%04x", 
-            data, my_addr, addr);
+    LOG_INF("[Direct] Sending data %d with original_src=0x%04x to nexthop=0x%04x", 
+            data, my_addr, nexthop);
     
-    return data_send_internal(gradient_srv, addr, my_addr, data);
+    return data_send_internal(gradient_srv, nexthop, my_addr, data);
 }

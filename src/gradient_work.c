@@ -77,6 +77,9 @@ static void cleanup_handler(struct k_work *work)
     
     LOG_DBG("[Cleanup] Running cleanup check...");
     
+    /* Lock forwarding table for thread-safe access */
+    k_mutex_lock(&g_gradient_srv->forwarding_table_mutex, K_FOREVER);
+    
     for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
         const neighbor_entry_t *entry = nt_get(
             (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
@@ -124,6 +127,10 @@ static void cleanup_handler(struct k_work *work)
 
     /* Update gradient based on best remaining parent */
     if (table_changed) {
+#ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
+        /* Sink node (Gateway) always has gradient=0, never update */
+        LOG_DBG("[Cleanup] Sink node, gradient fixed at 0");
+#else
         const neighbor_entry_t *best = nt_best(
             (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
             CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
@@ -133,9 +140,16 @@ static void cleanup_handler(struct k_work *work)
 
             if (best_parent_gradient != UINT8_MAX) {
                 uint8_t old_gradient = g_gradient_srv->gradient;
-                g_gradient_srv->gradient = rp_compute_new_gradient(best_parent_gradient);
+                uint8_t new_gradient = rp_compute_new_gradient(best_parent_gradient);
+                
+                /* Safety: Regular nodes cannot have gradient=0 */
+                if (new_gradient == 0) {
+                    new_gradient = 1;
+                }
+                
+                g_gradient_srv->gradient = new_gradient;
 
-                LOG_INF("[Process] Gradient updated: [%d] -> [%d]",
+                LOG_INF("[Cleanup] Gradient updated: [%d] -> [%d]",
                     old_gradient, g_gradient_srv->gradient);
 
                 /* Notify heartbeat module of gradient change */
@@ -150,6 +164,7 @@ static void cleanup_handler(struct k_work *work)
             heartbeat_update_gradient(g_gradient_srv->gradient);
             bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
         }
+#endif
         
         LOG_INF("[Cleanup] Forwarding table after cleanup:");
         for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
@@ -164,6 +179,9 @@ static void cleanup_handler(struct k_work *work)
             }
         }
     }
+
+    /* Unlock forwarding table */
+    k_mutex_unlock(&g_gradient_srv->forwarding_table_mutex);
 
     k_work_schedule(&cleanup_work, K_MSEC(CLEANUP_INTERVAL_MS));
 }
@@ -192,10 +210,16 @@ static void gradient_process_handler(struct k_work *work)
     
     int64_t current_time = k_uptime_get();
     
+    /* Lock forwarding table for thread-safe access */
+    k_mutex_lock(&gradient_srv->forwarding_table_mutex, K_FOREVER);
+    
     /* Update forwarding table using neighbor_table module */
     nt_update_sorted((neighbor_entry_t *)gradient_srv->forwarding_table,
                      CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
                      sender_addr, msg, rssi, current_time);
+
+    /* Unlock forwarding table */
+    k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
 
     /* Debug: Print forwarding table after update */
     LOG_DBG("[Process] Forwarding table after update:");
@@ -216,9 +240,22 @@ static void gradient_process_handler(struct k_work *work)
         CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
 
     if (best != NULL) {
+#ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
+        /* Sink node (Gateway) always has gradient=0, never update */
+        LOG_DBG("[Process] Sink node, gradient fixed at 0");
+#else
+        /* Regular node: update gradient based on best parent */
         if (rp_should_update_my_gradient(gradient_srv->gradient, best->gradient)) {
             uint8_t old_gradient = gradient_srv->gradient;
-            gradient_srv->gradient = rp_compute_new_gradient(best->gradient);
+            uint8_t new_gradient = rp_compute_new_gradient(best->gradient);
+            
+            /* Safety: Regular nodes cannot have gradient=0 (reserved for Gateway) */
+            if (new_gradient == 0) {
+                LOG_WRN("[Process] Prevented gradient=0 on non-sink node, using 1");
+                new_gradient = 1;
+            }
+            
+            gradient_srv->gradient = new_gradient;
             
             LOG_INF("[Process] Gradient updated: [%d] -> [%d]", 
                    old_gradient, gradient_srv->gradient);
@@ -228,6 +265,7 @@ static void gradient_process_handler(struct k_work *work)
             
             bt_mesh_gradient_srv_gradient_send(gradient_srv);
         }
+#endif
     }
     
     LOG_INF("[Process] Gradient handling completed");

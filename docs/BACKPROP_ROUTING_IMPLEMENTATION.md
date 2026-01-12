@@ -18,11 +18,11 @@ Trước khi implement, hệ thống chỉ hỗ trợ một chiều:
 
 ---
 
-## Chi Tiết Implementation Theo Từng Prompt
+## Chi Tiết Implementation Theo Từng Giai Đoạn
 
 ---
 
-### PROMPT 1: Thêm `original_source` vào DATA Packet
+### Giai đoạn 1: Thêm `original_source` vào DATA Packet
 
 ---
 

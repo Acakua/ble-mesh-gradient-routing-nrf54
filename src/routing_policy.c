@@ -41,9 +41,17 @@ bool rp_is_better(uint8_t new_grad, int8_t new_rssi, uint8_t old_grad, int8_t ol
 
 uint8_t rp_compute_new_gradient(uint8_t best_parent_grad)
 {
-	/* Preserve existing: best_parent_grad + 1
-	 * Uses uint8_t semantics (will wrap at 255)
+	/* Compute new gradient = best_parent_grad + 1
+	 * 
+	 * Special cases:
+	 * - If best_parent_grad = 255, result would overflow to 0
+	 * - But only SINK node can have gradient=0
+	 * - So clamp to 254 for non-sink nodes
 	 */
+	if (best_parent_grad >= 254) {
+		/* Prevent overflow to 0 (reserved for Gateway) */
+		return 254;
+	}
 	return (uint8_t)(best_parent_grad + 1);
 }
 

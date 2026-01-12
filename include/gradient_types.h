@@ -22,9 +22,11 @@ struct backprop_node;
 /**
  * @brief Neighbor entry structure for gradient routing forwarding table
  * 
- * NOTE: Field order MUST match bt_mesh_gradient_srv_forwarding_ctx in gradient_srv.h
+ * This is the canonical definition used by neighbor_table module.
+ * bt_mesh_gradient_srv_forwarding_ctx in gradient_srv.h is a typedef alias
+ * to this same structure.
  */
-typedef struct {
+typedef struct neighbor_entry {
 	uint16_t addr;      /**< Mesh unicast address of the neighbor */
 	int8_t rssi;        /**< Received signal strength indicator */
 	uint8_t gradient;   /**< Gradient value (distance to sink) */
