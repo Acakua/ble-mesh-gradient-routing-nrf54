@@ -226,15 +226,26 @@ uint16_t rrt_find_nexthop(const void *table, size_t table_size, uint16_t dest_ad
     const bt_mesh_gradient_srv_forwarding_ctx *ft = 
         (const bt_mesh_gradient_srv_forwarding_ctx *)table;
     
+    // LOG_DBG("[RRT_SEARCH] Looking for dest 0x%04x in table size %d", dest_addr, table_size);
+
     for (size_t i = 0; i < table_size; i++) {
-        if (ft[i].addr == 0) {
-            continue;  /* Skip empty entries */
+        /* Bỏ qua các entry trống */
+        if (ft[i].addr == GR_ADDR_UNASSIGNED || ft[i].addr == 0) {
+            continue;
+        }
+
+        /* Kiểm tra trực tiếp: Nếu đích đến chính là hàng xóm này */
+        if (ft[i].addr == dest_addr) {
+            LOG_DBG("[RRT] Found direct neighbor: 0x%04x", dest_addr);
+            return ft[i].addr;
         }
         
+        /* Kiểm tra danh sách gián tiếp (Backprop list) */
         backprop_node_t *current = ft[i].backprop_dest;
         while (current != NULL) {
+            // LOG_DBG("  Checking nexthop 0x%04x -> knows 0x%04x?", ft[i].addr, current->addr);
             if (current->addr == dest_addr) {
-                LOG_DBG("[RRT] Found route to 0x%04x via nexthop 0x%04x",
+                LOG_INF("[RRT] Found route to 0x%04x via nexthop 0x%04x",
                         dest_addr, ft[i].addr);
                 return ft[i].addr;
             }
@@ -242,9 +253,10 @@ uint16_t rrt_find_nexthop(const void *table, size_t table_size, uint16_t dest_ad
         }
     }
     
-    LOG_DBG("[RRT] No route found to dest 0x%04x", dest_addr);
+    LOG_WRN("[RRT] No route found to dest 0x%04x", dest_addr);
     return 0;  /* BT_MESH_ADDR_UNASSIGNED */
 }
+
 
 int rrt_cleanup_expired(void *table, size_t table_size,
                         int64_t current_time, int64_t timeout_ms)

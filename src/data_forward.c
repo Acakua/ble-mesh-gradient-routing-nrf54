@@ -14,19 +14,18 @@
 LOG_MODULE_REGISTER(data_forward, LOG_LEVEL_DBG);
 
 /* Timing constants */
-#define DATA_RETRY_DELAY_MS  100  /* 100ms - delay before retrying next entry */
+#define DATA_RETRY_DELAY_MS  100  /* 100ms */
 
 /* Work item for data send retry */
 static struct k_work_delayable data_retry_work;
 
-/* Context for data send with retry */
+/* Context for data send */
 struct data_send_context {
     struct bt_mesh_gradient_srv *gradient_srv;
     uint16_t data;
-    uint16_t original_source;  /* Original source address (node that created packet) */
-    uint16_t sender_addr;      /* Immediate sender address (to skip when forwarding) */
-    int current_index;         /* Current index in forwarding table */
-    bool active;               /* Has pending send */
+    uint16_t original_source;
+    uint16_t target_addr;     /* The specific chosen parent address */
+    bool active;
 };
 
 static struct data_send_context data_send_ctx = {0};
@@ -36,13 +35,64 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
                               uint16_t addr, uint16_t original_source, uint16_t data);
 
 /**
- * @brief Callback when data transmission completes
- *
- * Handles TX result and schedules retry if failed.
- *
- * @param err Error code (0 = success)
- * @param user_data Destination address cast to pointer
+ * @brief Find the BEST Parent strictly for Uplink Routing
+ * 
+ * Scans the entire table to find a neighbor with:
+ * 1. Gradient < My Gradient (CRITICAL CONDITION)
+ * 2. Best Gradient among valid candidates
+ * 3. Best RSSI among ties
+ * 
+ * @param srv Pointer to gradient server
+ * @param exclude_addr Address to exclude (e.g., the sender)
+ * @return Pointer to best entry, or NULL if no VALID PARENT found.
  */
+static const neighbor_entry_t *find_strict_upstream_parent(
+    struct bt_mesh_gradient_srv *srv, uint16_t exclude_addr)
+{
+    const neighbor_entry_t *best_candidate = NULL;
+    uint8_t my_gradient = srv->gradient;
+
+    /* If I am uninitialized, I cannot route properly */
+    if (my_gradient == UINT8_MAX) {
+        return NULL;
+    }
+
+    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+        const neighbor_entry_t *entry = nt_get(
+            (const neighbor_entry_t *)srv->forwarding_table,
+            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+            i);
+
+        if (!entry) continue;
+        if (entry->addr == exclude_addr) continue;
+
+        /* --- THE LAW: STRICT UPLINK RULE --- */
+        /* Only consider neighbors strictly closer to Gateway */
+        if (entry->gradient >= my_gradient) {
+            continue; /* Skip children, siblings, and bad paths */
+        }
+
+        /* Logic to pick the best among valid parents */
+        if (best_candidate == NULL) {
+            best_candidate = entry;
+        } else {
+            /* Compare with current best candidate */
+            /* Prioritize Lower Gradient */
+            if (entry->gradient < best_candidate->gradient) {
+                best_candidate = entry;
+            }
+            /* Tie-break with RSSI */
+            else if (entry->gradient == best_candidate->gradient) {
+                if (entry->rssi > best_candidate->rssi) {
+                    best_candidate = entry;
+                }
+            }
+        }
+    }
+
+    return best_candidate;
+}
+
 static void data_send_end_cb(int err, void *user_data)
 {
     uint16_t dest_addr = (uint16_t)(uintptr_t)user_data;
@@ -50,15 +100,15 @@ static void data_send_end_cb(int err, void *user_data)
     
     if (err) {
         LOG_ERR("[TX Complete] FAILED to send to 0x%04x, err=%d", dest_addr, err);
-        
-        if (ctx->active && ctx->gradient_srv) {
-            LOG_WRN("[TX Complete] Send to 0x%04x failed, trying next entry...", dest_addr);
-            k_work_schedule(&data_retry_work, K_MSEC(DATA_RETRY_DELAY_MS));
-        }
+        /* In this strict version, we do NOT blindly retry other nodes.
+           Retrying blindly causes loops. We just fail. 
+           Reliability is handled by upper layers or next periodic send. */
     } else {
         LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
-        ctx->active = false;
     }
+    
+    /* Always clear active flag */
+    ctx->active = false;
 }
 
 static const struct bt_mesh_send_cb data_send_cb = {
@@ -66,19 +116,6 @@ static const struct bt_mesh_send_cb data_send_cb = {
     .end = data_send_end_cb,
 };
 
-/**
- * @brief Internal function to send data message
- *
- * Sends data packet to specified address with TX callback.
- * Packet format: [original_source: 2 bytes] + [data: 2 bytes]
- *
- * @param gradient_srv Pointer to gradient server instance
- * @param addr Destination mesh address
- * @param original_source Address of node that originally created the packet
- * @param data Data payload to send
- *
- * @return 0 on success, negative error code on failure
- */
 static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
                               uint16_t addr, uint16_t original_source, uint16_t data)
 {
@@ -89,11 +126,10 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
         .send_rel = true,
     };
 
-    /* Packet format: [original_source: 2 bytes] + [data: 2 bytes] = 4 bytes */
     BT_MESH_MODEL_BUF_DEFINE(buf, BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE, 4);
     bt_mesh_model_msg_init(&buf, BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE);
-    net_buf_simple_add_le16(&buf, original_source);  /* Original source first */
-    net_buf_simple_add_le16(&buf, data);              /* Then data */
+    net_buf_simple_add_le16(&buf, original_source);
+    net_buf_simple_add_le16(&buf, data);
     
     LOG_DBG("[TX] Sending to 0x%04x: original_src=0x%04x, data=%d", 
             addr, original_source, data);
@@ -103,61 +139,10 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
                               (void *)(uintptr_t)addr);
 }
 
-/**
- * @brief Work handler for data send retry
- *
- * Attempts to send data to next entry in forwarding table after failure.
- *
- * @param work Pointer to work item (unused)
- */
+/* Handler Unused in Strict Mode but kept for compilation compatibility */
 static void data_retry_handler(struct k_work *work)
 {
-    struct data_send_context *ctx = &data_send_ctx;
-    
-    if (!ctx->active || !ctx->gradient_srv) {
-        ctx->active = false;
-        return;
-    }
-    
-    struct bt_mesh_gradient_srv *gradient_srv = ctx->gradient_srv;
-    
-    ctx->current_index++;
-    
-    while (ctx->current_index < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
-        const neighbor_entry_t *entry = nt_get(
-            (const neighbor_entry_t *)gradient_srv->forwarding_table,
-            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-            ctx->current_index);
-        
-        if (entry == NULL) {
-            LOG_ERR("[Retry] No more valid entries, data lost!");
-            ctx->active = false;
-            return;
-        }
-        
-        uint16_t next_addr = entry->addr;
-        
-        if (next_addr == ctx->sender_addr) {
-            LOG_DBG("[Retry] Skipping sender 0x%04x", next_addr);
-            ctx->current_index++;
-            continue;
-        }
-        
-        LOG_INF("[Retry] Trying index %d: addr=0x%04x", ctx->current_index, next_addr);
-        
-        int err = data_send_internal(gradient_srv, next_addr, ctx->original_source, ctx->data);
-        
-        if (err) {
-            LOG_ERR("[Retry] Failed to queue send to 0x%04x, err=%d", next_addr, err);
-            ctx->current_index++;
-            continue;
-        }
-        
-        return;
-    }
-    
-    LOG_ERR("[Retry] All entries exhausted, data lost!");
-    ctx->active = false;
+    data_send_ctx.active = false;
 }
 
 void data_forward_init(void)
@@ -168,105 +153,78 @@ void data_forward_init(void)
 int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t data, uint16_t original_source, uint16_t sender_addr)
 {
-    /* Check if route is available */
-    const neighbor_entry_t *best = nt_best(
-        (const neighbor_entry_t *)gradient_srv->forwarding_table,
-        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
-    
-    if (best == NULL) {
-        LOG_ERR("[Forward] No route available!");
-        return -ENETUNREACH;
-    }
-    
-    /* FIX: Check if retry context is busy */
+    /* FIX: Busy check */
     if (data_send_ctx.active) {
-        LOG_WRN("[Forward] System busy retrying previous packet, dropping new data %d", data);
+        LOG_WRN("[Forward] System busy, dropping packet %d", data);
         return -EBUSY;
     }
 
-    /* Indicate data forwarding */
+    /* FIX: Use Strict Parent Search instead of blind nt_best/iteration */
+    const neighbor_entry_t *best_parent = find_strict_upstream_parent(gradient_srv, sender_addr);
+
+    if (best_parent == NULL) {
+        LOG_ERR("[Forward] DROP! No valid PARENT found (neighbors have >= gradient %d)", 
+                gradient_srv->gradient);
+        /* Returning error stops the loop. Packet dies here. */
+        return -ENETUNREACH;
+    }
+
     led_indicate_data_forwarded();
     
-    /* Setup context for retry */
     data_send_ctx.gradient_srv = gradient_srv;
     data_send_ctx.data = data;
     data_send_ctx.original_source = original_source;
-    data_send_ctx.sender_addr = sender_addr;
-    data_send_ctx.current_index = 0;
+    data_send_ctx.target_addr = best_parent->addr;
     data_send_ctx.active = true;
     
-    /* Find first valid destination (skip sender) */
-    while (data_send_ctx.current_index < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) {
-        const neighbor_entry_t *entry = nt_get(
-            (const neighbor_entry_t *)gradient_srv->forwarding_table,
-            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-            data_send_ctx.current_index);
-        
-        if (entry == NULL) {
-            LOG_ERR("[Forward] No valid destination!");
-            data_send_ctx.active = false;
-            return -ENETUNREACH;
-        }
-        
-        uint16_t dest_addr = entry->addr;
-        
-        if (dest_addr == sender_addr) {
-            data_send_ctx.current_index++;
-            continue;
-        }
-        
-        LOG_INF("[Forward] Forwarding: original_src=0x%04x, data=%d, to=0x%04x (index %d)", 
-                original_source, data, dest_addr, data_send_ctx.current_index);
-        
-        int err = data_send_internal(gradient_srv, dest_addr, original_source, data);
-        
-        if (err) {
-            LOG_ERR("[Forward] Failed to queue, err=%d", err);
-            data_send_ctx.current_index++;
-            continue;
-        }
-        
-        return 0;
-    }
+    LOG_INF("[Forward] Selected PARENT 0x%04x (Grad: %d) for forwarding", 
+            best_parent->addr, best_parent->gradient);
     
-    LOG_ERR("[Forward] No valid destination after filtering!");
-    data_send_ctx.active = false;
-    return -ENETUNREACH;
+    int err = data_send_internal(gradient_srv, best_parent->addr, original_source, data);
+    if (err) {
+        data_send_ctx.active = false;
+        LOG_ERR("[Forward] TX failed start, err=%d", err);
+        return err;
+    }
+    return 0;
 }
 
 int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
                              uint16_t addr, uint16_t data)
 {
-    /* Get my own address as original_source (I am creating this packet) */
     uint16_t my_addr = bt_mesh_model_elem(gradient_srv->model)->rt->addr;
     
-    /* Find best nexthop from forwarding table (ignore addr parameter for heartbeat) */
-    const neighbor_entry_t *best = nt_best(
-        (const neighbor_entry_t *)gradient_srv->forwarding_table,
-        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
+    /* FIX: Busy check */
+    if (data_send_ctx.active) {
+        LOG_WRN("[Direct] System busy, dropping packet %d", data);
+        return -EBUSY;
+    }
+
+    /* FIX: Even for direct send (Heartbeat), strictly use Upstream Parent */
+    /* Ignore 'addr' parameter as this is for Uplink Data */
+    const neighbor_entry_t *best_parent = find_strict_upstream_parent(gradient_srv, BT_MESH_ADDR_UNASSIGNED);
     
-    if (best == NULL) {
-        LOG_WRN("[Direct] No route available in forwarding table!");
+    if (best_parent == NULL) {
+        LOG_WRN("[Direct] No Uplink Route! (Gradient %d, no lower neighbor)", 
+                gradient_srv->gradient);
         return -ENETUNREACH;
     }
     
-    /* FIX: Check if retry context is busy */
-    if (data_send_ctx.active) {
-        LOG_WRN("[Direct] System busy retrying previous packet, dropping new data %d", data);
-        return -EBUSY;
-    }
-    
-    uint16_t nexthop = best->addr;
+    uint16_t nexthop = best_parent->addr;
     
     data_send_ctx.gradient_srv = gradient_srv;
     data_send_ctx.data = data;
     data_send_ctx.original_source = my_addr;
-    data_send_ctx.sender_addr = BT_MESH_ADDR_UNASSIGNED;
-    data_send_ctx.current_index = 0;
+    data_send_ctx.target_addr = nexthop;
     data_send_ctx.active = true;
     
-    LOG_INF("[Direct] Sending data %d with original_src=0x%04x to nexthop=0x%04x", 
-            data, my_addr, nexthop);
+    LOG_INF("[Direct] Sending data %d to PARENT 0x%04x (Grad: %d)", 
+            data, nexthop, best_parent->gradient);
     
-    return data_send_internal(gradient_srv, nexthop, my_addr, data);
+    int err = data_send_internal(gradient_srv, nexthop, my_addr, data);
+    if (err) {
+        data_send_ctx.active = false;
+        return err;
+    }
+    return 0;
 }
