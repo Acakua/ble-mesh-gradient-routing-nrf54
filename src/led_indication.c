@@ -24,6 +24,7 @@ static bool attention_active = false;
 #define LED_GRADIENT    DK_LED3  /* LED for gradient received */
 #define LED_FORWARD     DK_LED2  /* LED for data forwarded */
 #define LED_SINK        DK_LED1  /* LED for sink received */
+#define LED_BACKPROP    DK_LED1  /* LED 0 for backprop received */
 
 /* Blink parameters */
 #define BLINK_COUNT_MAX       6    /* 6 toggles = 3 complete on/off cycles */
@@ -131,6 +132,13 @@ void led_indicate_sink_received(void)
     static bool led_state = false;
     led_state = !led_state;
     dk_set_led(LED_SINK, led_state);
+}
+
+void led_indicate_backprop_received(void)
+{
+    static bool led_state = false;
+    led_state = !led_state;
+    dk_set_led(LED_BACKPROP, led_state);
 }
 
 void led_indicate_attention(bool on)

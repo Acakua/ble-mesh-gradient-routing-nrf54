@@ -185,6 +185,19 @@ static void cleanup_handler(struct k_work *work)
             if (entry != NULL) {
                 LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
                         i, entry->addr, entry->gradient, entry->rssi);
+                
+                /* Print backprop_dest list */
+                backprop_node_t *dest = entry->backprop_dest;
+                if (dest != NULL) {
+                    LOG_INF("    backprop_dest:");
+                    while (dest != NULL) {
+                        LOG_INF("      -> dest=0x%04x (last_seen=%lld)",
+                                dest->addr, dest->last_seen);
+                        dest = dest->next;
+                    }
+                } else {
+                    LOG_INF("    backprop_dest: (empty)");
+                }
             }
         }
     }
@@ -245,6 +258,19 @@ static void gradient_process_handler(struct k_work *work)
         if (entry != NULL) {
             LOG_DBG("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
                     i, entry->addr, entry->gradient, entry->rssi);
+            
+            /* Print backprop_dest list */
+            backprop_node_t *dest = entry->backprop_dest;
+            if (dest != NULL) {
+                LOG_DBG("    backprop_dest:");
+                while (dest != NULL) {
+                    LOG_DBG("      -> dest=0x%04x (last_seen=%lld)",
+                            dest->addr, dest->last_seen);
+                    dest = dest->next;
+                }
+            } else {
+                LOG_DBG("    backprop_dest: (empty)");
+            }
         }
     }
 

@@ -42,6 +42,13 @@ void led_indicate_data_forwarded(void);
 void led_indicate_sink_received(void);
 
 /**
+ * @brief Indicate backprop data received at destination
+ *
+ * Toggles LED 0 to show backprop packet reached the destination node.
+ */
+void led_indicate_backprop_received(void);
+
+/**
  * @brief Indicate mesh attention state
  *
  * @param on true to start attention indication, false to stop

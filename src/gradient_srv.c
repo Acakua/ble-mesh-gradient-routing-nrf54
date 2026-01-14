@@ -80,52 +80,144 @@ static int handle_data_message(const struct bt_mesh_model *model,
     
     k_mutex_lock(&gradient_srv->forwarding_table_mutex, K_FOREVER);
     
-    /* === FIX: CHỐNG GHI ĐÈ GRADIENT === */
-    bool sender_exists = false;
+    /* ════════════════════════════════════════════════════════════════════
+     * FIX RACE CONDITION: Beacon vs Data
+     * ════════════════════════════════════════════════════════════════════
+     * 
+     * CHIẾN LƯỢC:
+     * 1. Nếu sender ĐÃ CÓ trong table:
+     *    → Update timestamp/RSSI (keep-alive)
+     *    → KHÔNG re-sort, KHÔNG sửa gradient
+     * 
+     * 2. Nếu sender CHƯA CÓ:
+     *    → KHÔNG add vào forwarding table (đợi beacon)
+     *    → NHƯNG VẪN HỌC RRT (quan trọng cho downlink!)
+     * 
+     * LÝ DO:
+     * - Forwarding table = cho UPLINK (cần gradient chính xác)
+     * - RRT = cho DOWNLINK (không cần gradient của intermediate hop)
+     */
+    
+    bool sender_found = false;
+    int sender_index = -1;
+    
+    /* Tìm sender trong forwarding table */
     for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
         if (gradient_srv->forwarding_table[i].addr == sender_addr) {
-            sender_exists = true;
-            /* CHỈ cập nhật thời gian và RSSI, TUYỆT ĐỐI KHÔNG sửa Gradient */
-            gradient_srv->forwarding_table[i].last_seen = now;
-            gradient_srv->forwarding_table[i].rssi = rssi; 
-            /* Cần re-sort lại nếu RSSI thay đổi nhiều, nhưng tạm thời 
-               để đơn giản ta chỉ update field. 
-               Nếu muốn sort lại, phải gọi nt_update_sorted với gradient CŨ */
+            sender_found = true;
+            sender_index = i;
             break;
         }
     }
-
-    if (!sender_exists) {
-        /* Chỉ đoán Gradient nếu là node hoàn toàn mới */
-        uint8_t entry_gradient = (gradient_srv->gradient == 0) ? UINT8_MAX : gradient_srv->gradient + 1;
-        LOG_INF("[Route Learn] New neighbor 0x%04x, guessing gradient=%d", sender_addr, entry_gradient);
-        nt_update_sorted(gradient_srv->forwarding_table,
-                         CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                         sender_addr, entry_gradient, rssi, now);
-    }
-    /* === END FIX === */
     
-    /* Reverse Route Learning logic giữ nguyên... */
+    if (sender_found) {
+        /* ────────────────────────────────────────────────────────────────
+         * CASE 1: Node đã tồn tại trong table
+         * ────────────────────────────────────────────────────────────────
+         * Chỉ refresh timestamp/RSSI, GIỮ NGUYÊN gradient.
+         * KHÔNG gọi nt_update_sorted để tránh race với beacon handler.
+         */
+        gradient_srv->forwarding_table[sender_index].last_seen = now;
+        gradient_srv->forwarding_table[sender_index].rssi = rssi;
+        
+        LOG_DBG("[Data RX] Refreshed 0x%04x: grad=%d (unchanged), rssi=%d", 
+                sender_addr, 
+                gradient_srv->forwarding_table[sender_index].gradient,
+                rssi);
+    } else {
+        /* ────────────────────────────────────────────────────────────────
+         * CASE 2: Node mới (chưa có trong forwarding table)
+         * ────────────────────────────────────────────────────────────────
+         * KHÔNG thêm vào forwarding table (đợi beacon để biết gradient).
+         * 
+         * LƯU Ý: Vẫn tiếp tục xử lý để:
+         * - Học RRT (cho downlink routing)
+         * - Forward data (nếu không phải gateway)
+         * 
+         * Node sẽ được thêm vào table khi:
+         * - Nhận beacon từ node này (trong vòng ~5s)
+         */
+        LOG_INF("[Data RX] Unknown sender 0x%04x (not in fwd table yet)", sender_addr);
+        LOG_INF("[Data RX] Will add to table when beacon arrives (~5s)");
+        
+        /* KHÔNG return, tiếp tục xử lý RRT bên dưới */
+    }
+    
+    /* ════════════════════════════════════════════════════════════════════
+     * Reverse Route Learning (RRT) - CHO DOWNLINK ROUTING
+     * ════════════════════════════════════════════════════════════════════
+     * 
+     * HỌC: "Để gửi đến original_source, đi qua sender_addr"
+     * 
+     * QUAN TRỌNG: 
+     * - Học RRT BẤT KỂ sender có trong forwarding table hay không!
+     * - RRT chỉ cần biết: nexthop nào có thể reach destination
+     * - Không cần biết gradient của nexthop
+     */
     int err = rrt_add_dest(gradient_srv->forwarding_table,
                            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                           sender_addr,
-                           original_source,
+                           sender_addr,      /* nexthop */
+                           original_source,  /* destination */
                            now);
     
-    /* ... (phần còn lại của hàm giữ nguyên) ... */
+    if (err == 0) {
+        LOG_DBG("[RRT] Learned: dest=0x%04x via nexthop=0x%04x", 
+                original_source, sender_addr);
+    } else if (err == -ENOENT) {
+        /* Nexthop không tồn tại trong forwarding table
+         * 
+         * Đây là EXPECTED cho node mới:
+         * - Data message đến trước beacon
+         * - sender_found = false
+         * - rrt_add_dest tìm không thấy entry → return -ENOENT
+         * 
+         * GIẢI PHÁP:
+         * - Chấp nhận, không cần học RRT lúc này
+         * - Khi beacon đến → Node vào forwarding table
+         * - Lần DATA tiếp theo → Học RRT thành công
+         */
+        LOG_DBG("[RRT] Cannot learn yet: nexthop 0x%04x not in table (wait for beacon)", 
+                sender_addr);
+    }
     
     k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
 
-    /* Forwarding logic... */
+    /* ════════════════════════════════════════════════════════════════════
+     * Forwarding Logic
+     * ════════════════════════════════════════════════════════════════════ */
+    
+    /* Gateway (Sink): Nhận data, không forward */
     if (gradient_srv->gradient == 0) {
         led_indicate_sink_received();
-        /* ... sink logic ... */
+        
+        LOG_INF("[Sink] Received data %d from original_src=0x%04x", 
+                received_data, original_source);
+        
+        /* Check if this is heartbeat */
+        if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
+            LOG_INF("[Sink] Heartbeat from 0x%04x - route is alive", original_source);
+        } else {
+            /* Normal data - callback to application */
+            if (gradient_srv->handlers->data_received) {
+                gradient_srv->handlers->data_received(gradient_srv, received_data);
+            }
+        }
         return 0;
     }
     
-    /* Sử dụng data_forward_send mới (đã có strict check) */
+    /* Regular Node: Forward data */
     err = data_forward_send(gradient_srv, received_data, original_source, sender_addr);
-    /* ... */
+    
+    if (err == 0) {
+        LOG_DBG("[Forward] Queued data %d from src=0x%04x", 
+                received_data, original_source);
+    } else if (err == -EBUSY) {
+        LOG_WRN("[Forward] Busy, dropped data %d", received_data);
+    } else if (err == -ENETUNREACH) {
+        LOG_ERR("[Forward] No route to gateway, dropped data %d", received_data);
+    } else {
+        LOG_ERR("[Forward] Failed to forward data %d, err=%d", received_data, err);
+    }
     
     return 0;
 }
@@ -161,7 +253,7 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     /* Check if we are the final destination */
     if (final_dest == my_addr) {
         LOG_INF("[BACKPROP] I am destination! Payload received: %d", payload);
-        led_indicate_gradient_received();  /* Visual indication */
+        led_indicate_backprop_received();  /* Toggle LED 0 */
         
         /* Callback to application if needed */
         if (gradient_srv->handlers->data_received) {
