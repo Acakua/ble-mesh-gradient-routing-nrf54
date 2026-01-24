@@ -11,8 +11,20 @@
 #include "data_forward.h"
 #include "gradient_work.h"
 #include "reverse_routing.h"
+#include <zephyr/kernel.h>
 
 LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_DBG);
+
+/* -------------------------------------------------------------------------
+ * DEFINES (FIXED: Thêm các định nghĩa thiếu)
+ * ------------------------------------------------------------------------- */
+#ifndef BT_MESH_GRADIENT_SRV_DEFAULT_TTL
+#define BT_MESH_GRADIENT_SRV_DEFAULT_TTL 10
+#endif
+
+#ifndef BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER
+#define BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER 0xFFFF
+#endif
 
 BUILD_ASSERT(BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS,
                    BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE) <=
@@ -23,8 +35,33 @@ BUILD_ASSERT(BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS,
             BT_MESH_TX_SDU_MAX,
          "The message must fit inside an application SDU.");
 
+/* -------------------------------------------------------------------------
+ * HELPER FUNCTIONS (FIXED: Đặt lên đầu để tránh lỗi implicit declaration)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * @brief Hàm in log định dạng CSV ra UART cho Sink Node
+ */
+static void log_csv_data(uint16_t src_addr, uint16_t sender_addr, 
+                         uint16_t data, int8_t rssi, uint8_t ttl_received)
+{
+    uint8_t hop_count = 0;
+    
+    // Tính toán số bước nhảy (Hop Count)
+    if (ttl_received > 0 && ttl_received <= BT_MESH_GRADIENT_SRV_DEFAULT_TTL) {
+        hop_count = BT_MESH_GRADIENT_SRV_DEFAULT_TTL - ttl_received;
+    } else {
+        // Trường hợp TTL lạ hoặc bằng 0
+        hop_count = 0; 
+    }
+
+    // Format: CSV_LOG,Source,Sender,Data,RSSI,Hops
+    printk("CSV_LOG,%u,%u,%u,%d,%u\n", 
+           src_addr, sender_addr, data, rssi, hop_count);
+}
+
 /******************************************************************************/
-/*                          Message Handlers                                  */
+/* Message Handlers                                  */
 /******************************************************************************/
 
 static int handle_gradient_mesage(const struct bt_mesh_model *model, 
@@ -69,6 +106,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
     struct bt_mesh_gradient_srv *gradient_srv = model->rt->user_data;
     uint16_t sender_addr = ctx->addr;
     int8_t rssi = ctx->recv_rssi;
+    uint8_t ttl_received = ctx->recv_ttl; // Lấy TTL để tính hops
     
     uint16_t original_source = net_buf_simple_pull_le16(buf);
     uint16_t received_data = net_buf_simple_pull_le16(buf);
@@ -82,21 +120,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
     
     /* ════════════════════════════════════════════════════════════════════
      * FIX RACE CONDITION: Beacon vs Data
-     * ════════════════════════════════════════════════════════════════════
-     * 
-     * CHIẾN LƯỢC:
-     * 1. Nếu sender ĐÃ CÓ trong table:
-     *    → Update timestamp/RSSI (keep-alive)
-     *    → KHÔNG re-sort, KHÔNG sửa gradient
-     * 
-     * 2. Nếu sender CHƯA CÓ:
-     *    → KHÔNG add vào forwarding table (đợi beacon)
-     *    → NHƯNG VẪN HỌC RRT (quan trọng cho downlink!)
-     * 
-     * LÝ DO:
-     * - Forwarding table = cho UPLINK (cần gradient chính xác)
-     * - RRT = cho DOWNLINK (không cần gradient của intermediate hop)
-     */
+     * ════════════════════════════════════════════════════════════════════ */
     
     bool sender_found = false;
     int sender_index = -1;
@@ -111,12 +135,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
     }
     
     if (sender_found) {
-        /* ────────────────────────────────────────────────────────────────
-         * CASE 1: Node đã tồn tại trong table
-         * ────────────────────────────────────────────────────────────────
-         * Chỉ refresh timestamp/RSSI, GIỮ NGUYÊN gradient.
-         * KHÔNG gọi nt_update_sorted để tránh race với beacon handler.
-         */
+        /* CASE 1: Node đã tồn tại -> Refresh timestamp */
         gradient_srv->forwarding_table[sender_index].last_seen = now;
         gradient_srv->forwarding_table[sender_index].rssi = rssi;
         
@@ -125,35 +144,14 @@ static int handle_data_message(const struct bt_mesh_model *model,
                 gradient_srv->forwarding_table[sender_index].gradient,
                 rssi);
     } else {
-        /* ────────────────────────────────────────────────────────────────
-         * CASE 2: Node mới (chưa có trong forwarding table)
-         * ────────────────────────────────────────────────────────────────
-         * KHÔNG thêm vào forwarding table (đợi beacon để biết gradient).
-         * 
-         * LƯU Ý: Vẫn tiếp tục xử lý để:
-         * - Học RRT (cho downlink routing)
-         * - Forward data (nếu không phải gateway)
-         * 
-         * Node sẽ được thêm vào table khi:
-         * - Nhận beacon từ node này (trong vòng ~5s)
-         */
+        /* CASE 2: Node mới -> Chỉ log, đợi beacon */
         LOG_INF("[Data RX] Unknown sender 0x%04x (not in fwd table yet)", sender_addr);
         LOG_INF("[Data RX] Will add to table when beacon arrives (~5s)");
-        
-        /* KHÔNG return, tiếp tục xử lý RRT bên dưới */
     }
     
     /* ════════════════════════════════════════════════════════════════════
-     * Reverse Route Learning (RRT) - CHO DOWNLINK ROUTING
-     * ════════════════════════════════════════════════════════════════════
-     * 
-     * HỌC: "Để gửi đến original_source, đi qua sender_addr"
-     * 
-     * QUAN TRỌNG: 
-     * - Học RRT BẤT KỂ sender có trong forwarding table hay không!
-     * - RRT chỉ cần biết: nexthop nào có thể reach destination
-     * - Không cần biết gradient của nexthop
-     */
+     * Reverse Route Learning (RRT)
+     * ════════════════════════════════════════════════════════════════════ */
     int err = rrt_add_dest(gradient_srv->forwarding_table,
                            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
                            sender_addr,      /* nexthop */
@@ -164,31 +162,21 @@ static int handle_data_message(const struct bt_mesh_model *model,
         LOG_DBG("[RRT] Learned: dest=0x%04x via nexthop=0x%04x", 
                 original_source, sender_addr);
     } else if (err == -ENOENT) {
-        /* Nexthop không tồn tại trong forwarding table
-         * 
-         * Đây là EXPECTED cho node mới:
-         * - Data message đến trước beacon
-         * - sender_found = false
-         * - rrt_add_dest tìm không thấy entry → return -ENOENT
-         * 
-         * GIẢI PHÁP:
-         * - Chấp nhận, không cần học RRT lúc này
-         * - Khi beacon đến → Node vào forwarding table
-         * - Lần DATA tiếp theo → Học RRT thành công
-         */
-        LOG_DBG("[RRT] Cannot learn yet: nexthop 0x%04x not in table (wait for beacon)", 
-                sender_addr);
+        LOG_DBG("[RRT] Cannot learn yet: nexthop 0x%04x not in table", sender_addr);
     }
     
     k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
 
     /* ════════════════════════════════════════════════════════════════════
-     * Forwarding Logic
+     * Forwarding Logic & LOGGING
      * ════════════════════════════════════════════════════════════════════ */
     
     /* Gateway (Sink): Nhận data, không forward */
     if (gradient_srv->gradient == 0) {
         led_indicate_sink_received();
+        
+        /* [FIXED] GỌI HÀM LOG CSV TẠI ĐÂY */
+        log_csv_data(original_source, sender_addr, received_data, rssi, ttl_received);
         
         LOG_INF("[Sink] Received data %d from original_src=0x%04x", 
                 received_data, original_source);
@@ -225,14 +213,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
 /**
  * @brief Handle BACKPROP_DATA message (Gateway → Node downlink)
- *
- * Packet format: [final_dest: 2 bytes] + [ttl: 1 byte] + [payload: 2 bytes]
- * Total: 5 bytes
- *
- * Logic:
- * 1. If final_dest == my address → deliver locally
- * 2. If TTL <= MIN_TTL → drop (prevent loops)
- * 3. Otherwise → find nexthop from RRT, forward with TTL-1
  */
 static int handle_backprop_message(const struct bt_mesh_model *model,
                                    struct bt_mesh_msg_ctx *ctx,
@@ -262,11 +242,10 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
         return 0;
     }
     
-    /* FIX: Strict check to ensure we have enough TTL to forward */
-    /* If current TTL is equal to or less than MIN+1, we stop here. */
+    /* Check TTL */
     if (ttl <= BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1) {
-        LOG_WRN("[BACKPROP] TTL expired (%d <= %d), dropping packet for dest=0x%04x", 
-                ttl, BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1, final_dest);
+        LOG_WRN("[BACKPROP] TTL expired (%d), dropping packet for dest=0x%04x", 
+                ttl, final_dest);
         return 0;
     }
     
@@ -305,7 +284,7 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
 }
 
 /******************************************************************************/
-/*                          Model Operations                                  */
+/* Model Operations                                  */
 /******************************************************************************/
 
 const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
@@ -328,7 +307,7 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
 };
 
 /******************************************************************************/
-/*                          Model Callbacks                                   */
+/* Model Callbacks                                   */
 /******************************************************************************/
 
 static int bt_mesh_gradient_srv_update_handler(const struct bt_mesh_model *model)
@@ -425,7 +404,7 @@ const struct bt_mesh_model_cb _bt_mesh_gradient_srv_cb = {
 };
 
 /******************************************************************************/
-/*                          Public APIs                                       */
+/* Public APIs                                       */
 /******************************************************************************/
 
 int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv)
@@ -439,8 +418,8 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
 }
 
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
-                                    uint16_t addr,
-                                    uint16_t data)
+                                   uint16_t addr,
+                                   uint16_t data)
 {
     return data_forward_send_direct(gradient_srv, addr, data);
 }
@@ -485,4 +464,3 @@ int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv
     
     return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
 }
-
