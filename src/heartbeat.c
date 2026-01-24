@@ -110,6 +110,11 @@ static void heartbeat_work_handler(struct k_work *work)
         return;
     }
     
+    /* * [THÊM ĐÁNH NHÃN LOG TẠI ĐÂY]
+     * In log đánh nhãn CONTROL trước khi gửi gói tin Heartbeat 
+     */
+    LOG_INF("[CONTROL] Sending Heartbeat (0xFFFF)");
+
     /* * Send heartbeat DATA packet via Unicast to Best Parent.
      * data_forward_send_direct handles looking up the parent.
      */

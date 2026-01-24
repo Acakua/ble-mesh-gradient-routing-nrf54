@@ -61,7 +61,7 @@ static void log_csv_data(uint16_t src_addr, uint16_t sender_addr,
 }
 
 /******************************************************************************/
-/* Message Handlers                                  */
+/* Message Handlers                                                           */
 /******************************************************************************/
 
 static int handle_gradient_mesage(const struct bt_mesh_model *model, 
@@ -88,6 +88,9 @@ static int handle_gradient_mesage(const struct bt_mesh_model *model,
 
     msg = net_buf_simple_pull_u8(buf);
 
+    // [THÊM ĐÁNH NHÃN CONTROL]
+    LOG_INF("[CONTROL - Gradient Beacon] Received from: 0x%04x, Gradient: %d", sender_addr, msg);
+
     /* Check if gradient should be processed using routing_policy */
     if (!rp_should_process_gradient(msg, gradient_srv->gradient)) {
         return 0;
@@ -111,8 +114,12 @@ static int handle_data_message(const struct bt_mesh_model *model,
     uint16_t original_source = net_buf_simple_pull_le16(buf);
     uint16_t received_data = net_buf_simple_pull_le16(buf);
 
-    LOG_INF("Received DATA: original_src=0x%04x, sender=0x%04x, data=%d", 
-            original_source, sender_addr, received_data);
+    // [THÊM LOGIC PHÂN LOẠI DATA / HEARTBEAT]
+    if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
+        LOG_INF("[CONTROL - Heartbeat] Recv from original: 0x%04x (via 0x%04x)", original_source, sender_addr);
+    } else {
+        LOG_INF("[DATA - Sensor] Recv from original: 0x%04x (via 0x%04x), Data: %d", original_source, sender_addr, received_data);
+    }
     
     int64_t now = k_uptime_get();
     
@@ -146,7 +153,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
     } else {
         /* CASE 2: Node mới -> Chỉ log, đợi beacon */
         LOG_INF("[Data RX] Unknown sender 0x%04x (not in fwd table yet)", sender_addr);
-        LOG_INF("[Data RX] Will add to table when beacon arrives (~5s)");
     }
     
     /* ════════════════════════════════════════════════════════════════════
@@ -161,8 +167,6 @@ static int handle_data_message(const struct bt_mesh_model *model,
     if (err == 0) {
         LOG_DBG("[RRT] Learned: dest=0x%04x via nexthop=0x%04x", 
                 original_source, sender_addr);
-    } else if (err == -ENOENT) {
-        LOG_DBG("[RRT] Cannot learn yet: nexthop 0x%04x not in table", sender_addr);
     }
     
     k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
@@ -175,15 +179,14 @@ static int handle_data_message(const struct bt_mesh_model *model,
     if (gradient_srv->gradient == 0) {
         led_indicate_sink_received();
         
-        /* [FIXED] GỌI HÀM LOG CSV TẠI ĐÂY */
-        log_csv_data(original_source, sender_addr, received_data, rssi, ttl_received);
-        
-        LOG_INF("[Sink] Received data %d from original_src=0x%04x", 
-                received_data, original_source);
+        /* GỌI HÀM LOG CSV CHO SINK (Chỉ log data thực, không log heartbeat vào CSV) */
+        if (received_data != BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
+            log_csv_data(original_source, sender_addr, received_data, rssi, ttl_received);
+        }
         
         /* Check if this is heartbeat */
         if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
-            LOG_INF("[Sink] Heartbeat from 0x%04x - route is alive", original_source);
+            LOG_INF("[CONTROL - Heartbeat] Arrived at Sink from 0x%04x", original_source);
         } else {
             /* Normal data - callback to application */
             if (gradient_srv->handlers->data_received) {
@@ -193,18 +196,13 @@ static int handle_data_message(const struct bt_mesh_model *model,
         return 0;
     }
     
-    /* Regular Node: Forward data */
+    /* Regular Node: Forward data (Bao gồm cả Heartbeat và Data) */
     err = data_forward_send(gradient_srv, received_data, original_source, sender_addr);
     
     if (err == 0) {
-        LOG_DBG("[Forward] Queued data %d from src=0x%04x", 
-                received_data, original_source);
-    } else if (err == -EBUSY) {
-        LOG_WRN("[Forward] Busy, dropped data %d", received_data);
-    } else if (err == -ENETUNREACH) {
-        LOG_ERR("[Forward] No route to gateway, dropped data %d", received_data);
+        LOG_DBG("[Forward] Queued packet from src=0x%04x", original_source);
     } else {
-        LOG_ERR("[Forward] Failed to forward data %d, err=%d", received_data, err);
+        LOG_ERR("[Forward] Failed to forward, err=%d", err);
     }
     
     return 0;
@@ -227,15 +225,14 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     uint8_t ttl = net_buf_simple_pull_u8(buf);
     uint16_t payload = net_buf_simple_pull_le16(buf);
     
-    LOG_INF("[BACKPROP] Received: dest=0x%04x, ttl=%d, payload=%d, from=0x%04x",
-            final_dest, ttl, payload, sender_addr);
+    // [THÊM ĐÁNH NHÃN CONTROL]
+    LOG_INF("[CONTROL - Backprop] Received: dest=0x%04x, payload=%d, from=0x%04x", final_dest, payload, sender_addr);
     
     /* Check if we are the final destination */
     if (final_dest == my_addr) {
-        LOG_INF("[BACKPROP] I am destination! Payload received: %d", payload);
-        led_indicate_backprop_received();  /* Toggle LED 0 */
+        LOG_INF("[CONTROL - Backprop] I am the destination! Payload: %d", payload);
+        led_indicate_backprop_received();
         
-        /* Callback to application if needed */
         if (gradient_srv->handlers->data_received) {
             gradient_srv->handlers->data_received(gradient_srv, payload);
         }
@@ -243,9 +240,8 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     }
     
     /* Check TTL */
-    if (ttl <= BT_MESH_GRADIENT_SRV_BACKPROP_MIN_TTL + 1) {
-        LOG_WRN("[BACKPROP] TTL expired (%d), dropping packet for dest=0x%04x", 
-                ttl, final_dest);
+    if (ttl <= 1) {
+        LOG_WRN("[CONTROL - Backprop] TTL expired, dropping packet");
         return 0;
     }
     
@@ -255,36 +251,33 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
                                         final_dest);
     
     if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
-        LOG_WRN("[BACKPROP] No route to dest=0x%04x, dropping", final_dest);
+        LOG_WRN("[CONTROL - Backprop] No route to dest=0x%04x, dropping", final_dest);
         return 0;
     }
     
-    LOG_INF("[BACKPROP] Forwarding to dest=0x%04x via nexthop=0x%04x, ttl=%d->%d",
-            final_dest, nexthop, ttl, ttl - 1);
-    
-    /* Prepare and send BACKPROP message to nexthop */
+    /* Forwarding logic */
     BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA, 5);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA);
     net_buf_simple_add_le16(&msg, final_dest);
-    net_buf_simple_add_u8(&msg, ttl - 1);  /* Decrement TTL */
+    net_buf_simple_add_u8(&msg, ttl - 1);
     net_buf_simple_add_le16(&msg, payload);
     
     struct bt_mesh_msg_ctx tx_ctx = {
         .app_idx = gradient_srv->model->keys[0],
         .addr = nexthop,
-        .send_ttl = 0,  /* Single hop - no BLE Mesh TTL */
+        .send_ttl = 0,
     };
     
     int err = bt_mesh_model_send(gradient_srv->model, &tx_ctx, &msg, NULL, NULL);
     if (err) {
-        LOG_ERR("[BACKPROP] Failed to forward, err=%d", err);
+        LOG_ERR("[CONTROL - Backprop] Forward failed, err=%d", err);
     }
     
     return 0;
 }
 
 /******************************************************************************/
-/* Model Operations                                  */
+/* Model Operations                                                           */
 /******************************************************************************/
 
 const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
@@ -300,14 +293,14 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     },
     {
         BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA,
-        BT_MESH_LEN_EXACT(5),  /* [final_dest:2] + [ttl:1] + [payload:2] */
+        BT_MESH_LEN_EXACT(5),
         handle_backprop_message
     },
     BT_MESH_MODEL_OP_END,
 };
 
 /******************************************************************************/
-/* Model Callbacks                                   */
+/* Model Callbacks                                                            */
 /******************************************************************************/
 
 static int bt_mesh_gradient_srv_update_handler(const struct bt_mesh_model *model)
@@ -318,7 +311,7 @@ static int bt_mesh_gradient_srv_update_handler(const struct bt_mesh_model *model
     bt_mesh_model_msg_init(buf, BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS);
     net_buf_simple_add_u8(buf, gradient_srv->gradient);
 
-    LOG_INF("Auto-published gradient: %d", gradient_srv->gradient);
+    LOG_INF("[CONTROL - Gradient Beacon] Auto-publishing gradient: %d", gradient_srv->gradient);
 
     return 0;
 }
@@ -404,7 +397,7 @@ const struct bt_mesh_model_cb _bt_mesh_gradient_srv_cb = {
 };
 
 /******************************************************************************/
-/* Public APIs                                       */
+/* Public APIs                                                                */
 /******************************************************************************/
 
 int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv)
@@ -414,6 +407,7 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
     bt_mesh_model_msg_init(buf, BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS);
     net_buf_simple_add_u8(buf, gradient_srv->gradient);
 
+    LOG_INF("[CONTROL - Gradient Beacon] Manually sending gradient status");
     return bt_mesh_model_publish(gradient_srv->model);
 }
 
@@ -432,7 +426,7 @@ int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv
     
     /* Cannot send to self */
     if (dest_addr == my_addr) {
-        LOG_ERR("[BACKPROP Send] Cannot send to self");
+        LOG_ERR("[CONTROL - Backprop Send] Cannot send to self");
         return -EINVAL;
     }
     
@@ -442,12 +436,12 @@ int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv
                                         dest_addr);
     
     if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
-        LOG_ERR("[BACKPROP Send] No route to dest=0x%04x", dest_addr);
+        LOG_ERR("[CONTROL - Backprop Send] No route to dest=0x%04x", dest_addr);
         return -ENETUNREACH;
     }
     
-    LOG_INF("[BACKPROP Send] Sending to dest=0x%04x via nexthop=0x%04x, ttl=%d, payload=%d",
-            dest_addr, nexthop, BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL, payload);
+    LOG_INF("[CONTROL - Backprop Send] Target: 0x%04x via Nexthop: 0x%04x, Data: %d",
+            dest_addr, nexthop, payload);
     
     /* Prepare BACKPROP_DATA message */
     BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA, 5);
@@ -459,7 +453,7 @@ int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv
     struct bt_mesh_msg_ctx ctx = {
         .app_idx = gradient_srv->model->keys[0],
         .addr = nexthop,
-        .send_ttl = 0,  /* Single hop - no BLE Mesh TTL */
+        .send_ttl = 0,
     };
     
     return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);

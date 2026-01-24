@@ -73,6 +73,11 @@ static void publish_handler(struct k_work *work)
     if (g_gradient_srv != NULL) {
         /* Only publish if we have a valid gradient (or we are Sink) */
         if (g_gradient_srv->gradient != UINT8_MAX) {
+            
+            // [THÊM ĐÁNH NHÃN LOG TẠI ĐÂY]
+            // Đánh nhãn CONTROL cho gói tin quảng bá định tuyến (Gradient Beacon)
+            LOG_INF("[CONTROL] Broadcasting Gradient Beacon: %d", g_gradient_srv->gradient);
+
             int err = bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
             if (err) {
                 LOG_WRN("Gradient publish failed: %d", err);

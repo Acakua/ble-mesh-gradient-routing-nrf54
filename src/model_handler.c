@@ -30,21 +30,21 @@ static uint16_t data_counter = 0;
 
 static void attention_on(const struct bt_mesh_model *mod)
 {
-	led_indicate_attention(true);
+    led_indicate_attention(true);
 }
 
 static void attention_off(const struct bt_mesh_model *mod)
 {
-	led_indicate_attention(false);
+    led_indicate_attention(false);
 }
 
 static const struct bt_mesh_health_srv_cb health_srv_cb = {
-	.attn_on = attention_on,
-	.attn_off = attention_off,
+    .attn_on = attention_on,
+    .attn_off = attention_off,
 };
 
 static struct bt_mesh_health_srv health_srv = {
-	.cb = &health_srv_cb,
+    .cb = &health_srv_cb,
 };
 
 BT_MESH_HEALTH_PUB_DEFINE(health_pub, 0);
@@ -67,55 +67,55 @@ static void print_client_status(void);
 
 static void handle_chat_start(struct bt_mesh_gradient_srv *Gradient)
 {
-	print_client_status();
-	
-	/* Start heartbeat after mesh is ready */
-	heartbeat_start(Gradient);
+    print_client_status();
+    
+    /* Start heartbeat after mesh is ready */
+    heartbeat_start(Gradient);
 }
 
 static void handle_data_received(struct bt_mesh_gradient_srv *srv, uint16_t data)
 {
-	LOG_INF("[App] BACKPROP data received: %d", data);
-	/* Add application-specific handling here */
+    LOG_INF("[App] BACKPROP data received: %d", data);
+    /* Add application-specific handling here */
 }
 
 static const struct bt_mesh_gradient_srv_handlers chat_handlers = {
-	.start = handle_chat_start,
-	.data_received = handle_data_received,
+    .start = handle_chat_start,
+    .data_received = handle_data_received,
 };
 
 /* .. include_startingpoint_model_handler_rst_1 */
 /* Non-static to allow access from shell_commands.c */
 struct bt_mesh_gradient_srv gradient_srv = {
-	.handlers = &chat_handlers,
+    .handlers = &chat_handlers,
 };
 
 static struct bt_mesh_elem elements[] = {
-	BT_MESH_ELEM(
-		1,
-		BT_MESH_MODEL_LIST(
-			BT_MESH_MODEL_CFG_SRV,
-			BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub)),
-		BT_MESH_MODEL_LIST(BT_MESH_MODEL_GRADIENT_SRV(&gradient_srv))),
+    BT_MESH_ELEM(
+        1,
+        BT_MESH_MODEL_LIST(
+            BT_MESH_MODEL_CFG_SRV,
+            BT_MESH_MODEL_HEALTH_SRV(&health_srv, &health_pub)),
+        BT_MESH_MODEL_LIST(BT_MESH_MODEL_GRADIENT_SRV(&gradient_srv))),
 };
 /* .. include_endpoint_model_handler_rst_1 */
 
 static void print_client_status(void)
 {
-	if (!bt_mesh_is_provisioned()) {
-		shell_print(chat_shell,
-			    "The mesh node is not provisioned. Please provision the mesh node before using the chat.");
-	} else {
-		shell_print(chat_shell,
-			    "The mesh node is provisioned. The client address is 0x%04x.",
-			    bt_mesh_model_elem(gradient_srv.model)->rt->addr);
-	}
+    if (!bt_mesh_is_provisioned()) {
+        shell_print(chat_shell,
+                "The mesh node is not provisioned. Please provision the mesh node before using the chat.");
+    } else {
+        shell_print(chat_shell,
+                "The mesh node is provisioned. The client address is 0x%04x.",
+                bt_mesh_model_elem(gradient_srv.model)->rt->addr);
+    }
 }
 
 static const struct bt_mesh_comp comp = {
-	.cid = CONFIG_BT_COMPANY_ID,
-	.elem = elements,
-	.elem_count = ARRAY_SIZE(elements),
+    .cid = CONFIG_BT_COMPANY_ID,
+    .elem = elements,
+    .elem_count = ARRAY_SIZE(elements),
 };
 
 /******************************************************************************/
@@ -142,7 +142,7 @@ const struct bt_mesh_comp *model_handler_init(void)
     heartbeat_init();
 
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
-	
+    
     // Node này là sink (cấu hình qua Kconfig)
     gradient_srv.gradient = 0;
     LOG_INF("Initialized as SINK node (gradient = 0)\n");
@@ -202,6 +202,10 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
         
         data_counter++;
         uint16_t dest_addr = gradient_srv.forwarding_table[0].addr;
+
+        // [THÊM ĐÁNH NHÃN LOG TẠI ĐÂY]
+        // Đánh nhãn DATA cho việc gửi dữ liệu cảm biến
+        LOG_INF("[DATA] Sending Data: Seq=%u", data_counter);
 
         LOG_INF("Sending data %d to 0x%04x...", data_counter, dest_addr);
 
