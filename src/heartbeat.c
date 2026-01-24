@@ -1,8 +1,8 @@
 /*
  * Copyright (c) 2024
  * SPDX-License-Identifier: Apache-2.0
- * 
- * Heartbeat Module Implementation
+ * * Heartbeat Module Implementation
+ * Implements Adaptive Heartbeat Mechanism
  */
 
 #include <zephyr/kernel.h>
@@ -16,7 +16,33 @@
 LOG_MODULE_REGISTER(heartbeat, LOG_LEVEL_DBG);
 
 /*============================================================================*/
-/*                              Private Data                                  */
+/* Configuration                                 */
+/*============================================================================*/
+
+/* Adaptive Intervals (in seconds) */
+#define HB_INTERVAL_FAST        5   /* Initial / Recovery state */
+#define HB_INTERVAL_MEDIUM      10  /* Intermediate state */
+#define HB_INTERVAL_SLOW        20  /* Stable state */
+/* Note: The "Maintenance" interval comes from Kconfig (default 3600s) */
+
+/* Marker for Heartbeat Data Packet */
+#ifndef BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER
+#define BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER 0xFFFF
+#endif
+
+/*============================================================================*/
+/* Private Types                                 */
+/*============================================================================*/
+
+enum heartbeat_state {
+    HB_STATE_FAST,          /* 5s */
+    HB_STATE_MEDIUM,        /* 10s */
+    HB_STATE_SLOW,          /* 20s */
+    HB_STATE_MAINTENANCE    /* Kconfig Interval (e.g., 1h) */
+};
+
+/*============================================================================*/
+/* Private Data                                  */
 /*============================================================================*/
 
 /** Reference to gradient server for sending packets */
@@ -28,20 +54,37 @@ static uint8_t current_gradient = UINT8_MAX;
 /** Flag indicating if heartbeat has been started */
 static bool heartbeat_started = false;
 
+/** Current state of the adaptive heartbeat state machine */
+static enum heartbeat_state current_hb_state = HB_STATE_FAST;
+
 /** Delayable work item for periodic heartbeat */
 static struct k_work_delayable heartbeat_work;
 
 /*============================================================================*/
-/*                           Private Functions                                */
+/* Private Functions                                */
 /*============================================================================*/
 
 /**
+ * @brief Get the interval in seconds based on current state
+ */
+static uint32_t get_current_interval_sec(void)
+{
+    switch (current_hb_state) {
+        case HB_STATE_FAST:
+            return HB_INTERVAL_FAST;
+        case HB_STATE_MEDIUM:
+            return HB_INTERVAL_MEDIUM;
+        case HB_STATE_SLOW:
+            return HB_INTERVAL_SLOW;
+        case HB_STATE_MAINTENANCE:
+            return CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC;
+        default:
+            return HB_INTERVAL_FAST;
+    }
+}
+
+/**
  * @brief Work handler - sends one heartbeat packet
- *
- * This function is called by the work queue every HEARTBEAT_INTERVAL_SEC.
- * It sends a DATA packet with:
- * - original_source = this node's address (auto-filled by data_forward_send_direct)
- * - data = HEARTBEAT_MARKER (0xFFFF)
  */
 static void heartbeat_work_handler(struct k_work *work)
 {
@@ -49,73 +92,76 @@ static void heartbeat_work_handler(struct k_work *work)
     
 #ifdef CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_ENABLED
     /* Safety checks */
-    if (!heartbeat_srv) {
-        LOG_ERR("[Heartbeat] No server reference, stopping");
-        heartbeat_started = false;
+    if (!heartbeat_srv || !heartbeat_started) {
         return;
     }
     
     /* Don't send if we are Gateway (gradient = 0) */
     if (current_gradient == 0) {
         LOG_DBG("[Heartbeat] Gateway does not send heartbeat");
-        /* Don't reschedule - will be restarted if gradient changes */
         heartbeat_started = false;
         return;
     }
     
-    /* Don't send if gradient is still uninitialized */
+    /* Don't send if gradient is uninitialized */
     if (current_gradient == UINT8_MAX) {
         LOG_DBG("[Heartbeat] Gradient not yet set, skipping");
-        /* Reschedule to check again later */
-        k_work_reschedule(&heartbeat_work, 
-                          K_SECONDS(CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC));
+        k_work_reschedule(&heartbeat_work, K_SECONDS(HB_INTERVAL_FAST));
         return;
     }
     
-    /* Send heartbeat DATA packet
-     * 
-     * data_forward_send_direct() will:
-     * - Set original_source = this node's address
-     * - Find best nexthop towards Gateway
-     * - Send DATA packet
-     * 
-     * When Gateway receives this, it learns:
-     * "To reach this node, go via the neighbor that forwarded this packet"
+    /* * Send heartbeat DATA packet via Unicast to Best Parent.
+     * data_forward_send_direct handles looking up the parent.
      */
-    uint16_t dummy_addr = 0;  /* Not used for direct send */
+    uint16_t dummy_addr = 0; 
     int err = data_forward_send_direct(heartbeat_srv, dummy_addr, 
-                                       BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER);
+                                     BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER);
     
     if (err == 0) {
-        LOG_INF("[Heartbeat] Sent heartbeat (gradient=%d)", current_gradient);
-    } else if (err == -ENETUNREACH) {
-        LOG_WRN("[Heartbeat] No route to Gateway yet, will retry");
+        /* SUCCESS: Transition towards Maintenance State */
+        switch (current_hb_state) {
+            case HB_STATE_FAST:
+                LOG_DBG("[Heartbeat] FAST -> MEDIUM");
+                current_hb_state = HB_STATE_MEDIUM;
+                break;
+            case HB_STATE_MEDIUM:
+                LOG_DBG("[Heartbeat] MEDIUM -> SLOW");
+                current_hb_state = HB_STATE_SLOW;
+                break;
+            case HB_STATE_SLOW:
+                LOG_INF("[Heartbeat] SLOW -> MAINTENANCE (Network Stable)");
+                current_hb_state = HB_STATE_MAINTENANCE;
+                break;
+            case HB_STATE_MAINTENANCE:
+                LOG_DBG("[Heartbeat] Keeping MAINTENANCE state");
+                break;
+        }
     } else {
-        LOG_ERR("[Heartbeat] Failed to send, err=%d", err);
+        /* FAILURE: Reset to FAST state to recover connectivity */
+        if (current_hb_state != HB_STATE_FAST) {
+            LOG_WRN("[Heartbeat] TX Failed (err %d), resetting to FAST state", err);
+            current_hb_state = HB_STATE_FAST;
+        } else {
+            LOG_ERR("[Heartbeat] TX Failed (err %d) in FAST state", err);
+        }
     }
     
-    /* Reschedule next heartbeat */
-    k_work_reschedule(&heartbeat_work, 
-                      K_SECONDS(CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC));
+    /* Reschedule based on new state */
+    uint32_t next_interval = get_current_interval_sec();
+    k_work_reschedule(&heartbeat_work, K_SECONDS(next_interval));
 #endif
 }
 
 /**
- * @brief Calculate random initial delay to avoid synchronized heartbeats
- *
- * If all nodes start sending heartbeat at the same time (e.g., after power-on),
- * there will be packet collisions. This adds a random delay 0-10 seconds.
- *
- * @return Random delay in milliseconds
+ * @brief Calculate random initial delay (0-10s)
  */
 static uint32_t get_random_initial_delay_ms(void)
 {
-    /* Random delay between 0 and 10 seconds */
     return sys_rand32_get() % 10000;
 }
 
 /*============================================================================*/
-/*                            Public Functions                                */
+/* Public Functions                                */
 /*============================================================================*/
 
 void heartbeat_init(void)
@@ -125,8 +171,9 @@ void heartbeat_init(void)
     heartbeat_srv = NULL;
     heartbeat_started = false;
     current_gradient = UINT8_MAX;
+    current_hb_state = HB_STATE_FAST;
     
-    LOG_INF("[Heartbeat] Initialized (interval=%d sec)", 
+    LOG_INF("[Heartbeat] Initialized (Maintenance Interval=%d sec)", 
             CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC);
 #else
     LOG_INF("[Heartbeat] Disabled by config");
@@ -142,27 +189,26 @@ void heartbeat_start(struct bt_mesh_gradient_srv *srv)
     }
     
     if (heartbeat_started) {
-        LOG_DBG("[Heartbeat] Already started");
-        return;
+        return; /* Already started */
     }
     
     heartbeat_srv = srv;
     current_gradient = srv->gradient;
     
-    /* Don't start if we are Gateway */
+    /* Gateway check */
     if (current_gradient == 0) {
-        LOG_INF("[Heartbeat] Not starting - this is Gateway");
+        LOG_INF("[Heartbeat] This is Gateway, heartbeat not required");
         return;
     }
     
     heartbeat_started = true;
+    current_hb_state = HB_STATE_FAST; /* Always start FAST */
     
-    /* Schedule first heartbeat with random delay to avoid collision */
+    /* Random delay start */
     uint32_t initial_delay_ms = get_random_initial_delay_ms();
     k_work_reschedule(&heartbeat_work, K_MSEC(initial_delay_ms));
     
-    LOG_INF("[Heartbeat] Started (first in %u ms, then every %d sec)",
-            initial_delay_ms, CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC);
+    LOG_INF("[Heartbeat] Started (Delay: %dms, Mode: FAST)", initial_delay_ms);
 #else
     ARG_UNUSED(srv);
 #endif
@@ -177,7 +223,6 @@ void heartbeat_stop(void)
     
     k_work_cancel_delayable(&heartbeat_work);
     heartbeat_started = false;
-    
     LOG_INF("[Heartbeat] Stopped");
 #endif
 }
@@ -188,18 +233,42 @@ void heartbeat_update_gradient(uint8_t new_gradient)
     uint8_t old_gradient = current_gradient;
     current_gradient = new_gradient;
     
-    /* If we just became Gateway, stop heartbeat */
+    /* Case 1: Became Gateway -> Stop */
     if (new_gradient == 0 && heartbeat_started) {
-        LOG_INF("[Heartbeat] Became Gateway, stopping heartbeat");
+        LOG_INF("[Heartbeat] Became Gateway, stopping");
         heartbeat_stop();
     }
-    /* If we were Gateway and now are not, start heartbeat */
-    else if (old_gradient == 0 && new_gradient != 0 && heartbeat_srv && !heartbeat_started) {
-        LOG_INF("[Heartbeat] No longer Gateway, starting heartbeat");
+    /* Case 2: No longer Gateway -> Start */
+    else if (old_gradient == 0 && new_gradient != 0) {
+        LOG_INF("[Heartbeat] No longer Gateway, starting");
         heartbeat_start(heartbeat_srv);
+    }
+    /* Case 3: Gradient changed (Topology changed) -> Reset to FAST */
+    else if (heartbeat_started && (old_gradient != new_gradient)) {
+        LOG_INF("[Heartbeat] Gradient changed (%d->%d), resetting cycle", 
+                old_gradient, new_gradient);
+        heartbeat_trigger_reset();
     }
 #else
     ARG_UNUSED(new_gradient);
+#endif
+}
+
+void heartbeat_trigger_reset(void)
+{
+#ifdef CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_ENABLED
+    if (!heartbeat_started) {
+        return;
+    }
+
+    /* Only reset if not already in FAST state to avoid unnecessary spam */
+    if (current_hb_state != HB_STATE_FAST) {
+        LOG_INF("[Heartbeat] Triggered RESET to FAST state");
+        current_hb_state = HB_STATE_FAST;
+        
+        /* Schedule immediate run (small delay to avoid race conditions) */
+        k_work_reschedule(&heartbeat_work, K_MSEC(100));
+    }
 #endif
 }
 

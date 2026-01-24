@@ -14,15 +14,34 @@
 
 LOG_MODULE_REGISTER(gradient_work, LOG_LEVEL_DBG);
 
+/* ========================================================================= */
+/* Configuration                               */
+/* ========================================================================= */
+
+/* Default timeout if not defined in Kconfig */
+#ifndef CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS
+#define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS  120000 /* 120s */
+#endif
+
 /* Timing constants */
-#define CLEANUP_INTERVAL_MS       15000  /* 15s - interval between cleanup checks */
-#define INITIAL_PUBLISH_DELAY_MS  500    /* 500ms - delay before first gradient publish */
+#define CLEANUP_INTERVAL_MS       15000  /* Check for expired neighbors every 15s */
+#define INITIAL_PUBLISH_DELAY_MS  500    /* Random jitter start */
+
+/* Periodic Gradient Publish Interval 
+ * Should be less than NODE_TIMEOUT_MS to keep neighbors alive.
+ * Recommneded: Timeout / 3 
+ */
+#define GRADIENT_PUBLISH_INTERVAL_MS (CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS / 3)
+
+/* ========================================================================= */
+/* Private Data                                */
+/* ========================================================================= */
 
 /* Global gradient server reference */
 static struct bt_mesh_gradient_srv *g_gradient_srv = NULL;
 
 /* Work items */
-static struct k_work_delayable initial_publish_work;
+static struct k_work_delayable publish_work;
 static struct k_work_delayable gradient_process_work;
 static struct k_work_delayable cleanup_work;
 
@@ -39,32 +58,38 @@ static struct gradient_context gradient_ctx = {0};
 /* Forward declaration */
 int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv);
 
+/* ========================================================================= */
+/* Work Handlers                                 */
+/* ========================================================================= */
+
 /**
- * @brief Work handler for initial gradient publish
+ * @brief Work handler for periodic gradient publish
  *
- * Publishes the first gradient beacon after node startup.
- *
- * @param work Pointer to work item (unused)
+ * Publishes Gradient Beacon to advertise presence and metric to neighbors.
+ * Keeps the node "alive" in neighbors' tables.
  */
-static void initial_publish_handler(struct k_work *work)
+static void publish_handler(struct k_work *work)
 {
     if (g_gradient_srv != NULL) {
-        int err = bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
-        
-        if (err) {
-            LOG_INF("Initial publish failed: %d", err);
-        } else {
-            LOG_INF("Initial gradient published: %d", g_gradient_srv->gradient);
+        /* Only publish if we have a valid gradient (or we are Sink) */
+        if (g_gradient_srv->gradient != UINT8_MAX) {
+            int err = bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
+            if (err) {
+                LOG_WRN("Gradient publish failed: %d", err);
+            } else {
+                LOG_DBG("Gradient published: %d", g_gradient_srv->gradient);
+            }
         }
+        
+        /* Reschedule for next period to keep neighbors updated */
+        k_work_reschedule(&publish_work, K_MSEC(GRADIENT_PUBLISH_INTERVAL_MS));
     }
 }
 
 /**
  * @brief Work handler for periodic neighbor cleanup
  *
- * Removes expired neighbors from forwarding table and updates gradient if needed.
- *
- * @param work Pointer to work item (unused)
+ * Removes expired neighbors and updates gradient/heartbeat if needed.
  */
 static void cleanup_handler(struct k_work *work)
 {
@@ -74,7 +99,8 @@ static void cleanup_handler(struct k_work *work)
     
     int64_t current_time = k_uptime_get();
     bool table_changed = false;
-    bool should_publish = false;  // Flag to defer publication
+    bool should_publish = false;
+    bool best_parent_lost = false; /* Flag to trigger heartbeat reset */
     
     LOG_DBG("[Cleanup] Running cleanup check...");
     
@@ -99,6 +125,12 @@ static void cleanup_handler(struct k_work *work)
             LOG_WRN("[Cleanup] Node 0x%04x expired (last seen %lld ms ago)",
                     entry->addr, current_time - entry->last_seen);
             
+            /* Detect if we are losing our Best Parent (Index 0) */
+            if (i == 0) {
+                best_parent_lost = true;
+                LOG_WRN("[Cleanup] BEST PARENT lost! Route instability detected.");
+            }
+            
             /* Free backprop_dest linked list before removing entry */
             rrt_clear_entry(
                 (void *)g_gradient_srv->forwarding_table,
@@ -111,16 +143,13 @@ static void cleanup_handler(struct k_work *work)
                 i);
             
             if (removed_addr != GR_ADDR_UNASSIGNED) {
-                LOG_INF("[Forwarding] Removed 0x%04x from index %d", removed_addr, i);
                 table_changed = true;
                 i--;  /* Re-check this index since entries shifted */
             }
         }
     }
 
-    /* ========================================
-     * Cleanup reverse routing table
-     * ======================================== */
+    /* Cleanup reverse routing table */
     int64_t rrt_timeout_ms = CONFIG_BT_MESH_GRADIENT_SRV_RRT_TIMEOUT_SEC * 1000LL;
     int rrt_removed = rrt_cleanup_expired(
         g_gradient_srv->forwarding_table,
@@ -135,7 +164,7 @@ static void cleanup_handler(struct k_work *work)
     /* Update gradient based on best remaining parent */
     if (table_changed) {
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
-        /* Sink node (Gateway) always has gradient=0, never update */
+        /* Sink node (Gateway) always has gradient=0 */
         LOG_DBG("[Cleanup] Sink node, gradient fixed at 0");
 #else
         const neighbor_entry_t *best = nt_best(
@@ -149,63 +178,35 @@ static void cleanup_handler(struct k_work *work)
                 uint8_t old_gradient = g_gradient_srv->gradient;
                 uint8_t new_gradient = rp_compute_new_gradient(best_parent_gradient);
                 
-                /* Safety: Regular nodes cannot have gradient=0 */
-                if (new_gradient == 0) {
-                    new_gradient = 1;
-                }
+                if (new_gradient == 0) new_gradient = 1; /* Safety */
                 
                 g_gradient_srv->gradient = new_gradient;
 
-                LOG_INF("[Cleanup] Gradient updated: [%d] -> [%d]",
-                    old_gradient, g_gradient_srv->gradient);
-
-                /* Notify heartbeat module of gradient change */
-                heartbeat_update_gradient(g_gradient_srv->gradient);
-
-                /* DEFER PUBLICATION */
-                should_publish = true;
+                if (old_gradient != new_gradient) {
+                     LOG_INF("[Cleanup] Gradient updated: [%d] -> [%d]",
+                            old_gradient, g_gradient_srv->gradient);
+                     /* Gradient change will trigger Heartbeat Reset internally */
+                     heartbeat_update_gradient(g_gradient_srv->gradient);
+                     should_publish = true;
+                } else if (best_parent_lost) {
+                     /* CRITICAL: Gradient didn't change (backup parent has same gradient),
+                      * BUT we lost our active path. We MUST trigger reset to 
+                      * establish route via backup parent immediately. */
+                     LOG_INF("[Cleanup] Gradient same, but parent changed. Triggering Heartbeat Reset.");
+                     heartbeat_trigger_reset();
+                }
             }
         } else {
             LOG_WRN("[Cleanup] No parents available, resetting gradient to 255");
             g_gradient_srv->gradient = UINT8_MAX;
-            /* Notify heartbeat module of gradient change */
             heartbeat_update_gradient(g_gradient_srv->gradient);
-            /* DEFER PUBLICATION */
             should_publish = true;
         }
 #endif
-        
-        LOG_INF("[Cleanup] Forwarding table after cleanup:");
-        for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
-            const neighbor_entry_t *entry = nt_get(
-                (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
-                CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                i);
-            
-            if (entry != NULL) {
-                LOG_INF("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
-                        i, entry->addr, entry->gradient, entry->rssi);
-                
-                /* Print backprop_dest list */
-                backprop_node_t *dest = entry->backprop_dest;
-                if (dest != NULL) {
-                    LOG_INF("    backprop_dest:");
-                    while (dest != NULL) {
-                        LOG_INF("      -> dest=0x%04x (last_seen=%lld)",
-                                dest->addr, dest->last_seen);
-                        dest = dest->next;
-                    }
-                } else {
-                    LOG_INF("    backprop_dest: (empty)");
-                }
-            }
-        }
     }
 
-    /* Unlock forwarding table */
     k_mutex_unlock(&g_gradient_srv->forwarding_table_mutex);
 
-    /* EXECUTE PUBLICATION SAFELY */
     if (should_publish) {
         bt_mesh_gradient_srv_gradient_send(g_gradient_srv);
     }
@@ -215,10 +216,6 @@ static void cleanup_handler(struct k_work *work)
 
 /**
  * @brief Work handler for gradient message processing
- *
- * Processes received gradient beacon and updates forwarding table.
- *
- * @param work Pointer to work item (unused)
  */
 static void gradient_process_handler(struct k_work *work)
 {
@@ -228,79 +225,42 @@ static void gradient_process_handler(struct k_work *work)
     int8_t rssi = ctx->rssi;
     uint16_t sender_addr = ctx->sender_addr;
     
-    if (!gradient_srv) {
-        return;
-    }
+    if (!gradient_srv) return;
 
-    LOG_INF("Received gradient %d from 0x%04x (RSSI: %d)", 
-           msg, sender_addr, rssi);
+    LOG_DBG("Received gradient %d from 0x%04x (RSSI: %d)", msg, sender_addr, rssi);
     
     int64_t current_time = k_uptime_get();
     
-    /* Lock forwarding table for thread-safe access */
     k_mutex_lock(&gradient_srv->forwarding_table_mutex, K_FOREVER);
     
-    /* Update forwarding table using neighbor_table module */
     nt_update_sorted((neighbor_entry_t *)gradient_srv->forwarding_table,
-                     CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                     sender_addr, msg, rssi, current_time);
+                      CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                      sender_addr, msg, rssi, current_time);
 
-    /* Unlock forwarding table */
     k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
 
-    /* Debug: Print forwarding table after update */
-    LOG_DBG("[Process] Forwarding table after update:");
-    for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
-        const neighbor_entry_t *entry = nt_get(
-            (const neighbor_entry_t *)gradient_srv->forwarding_table,
-            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-            i);
-        if (entry != NULL) {
-            LOG_DBG("  [%d] addr=0x%04x, gradient=%d, rssi=%d",
-                    i, entry->addr, entry->gradient, entry->rssi);
-            
-            /* Print backprop_dest list */
-            backprop_node_t *dest = entry->backprop_dest;
-            if (dest != NULL) {
-                LOG_DBG("    backprop_dest:");
-                while (dest != NULL) {
-                    LOG_DBG("      -> dest=0x%04x (last_seen=%lld)",
-                            dest->addr, dest->last_seen);
-                    dest = dest->next;
-                }
-            } else {
-                LOG_DBG("    backprop_dest: (empty)");
-            }
-        }
-    }
-
-    /* Check if gradient should be updated using routing_policy module */
+    /* Check if gradient should be updated */
     const neighbor_entry_t *best = nt_best(
         (const neighbor_entry_t *)gradient_srv->forwarding_table,
         CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
 
     if (best != NULL) {
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
-        /* Sink node (Gateway) always has gradient=0, never update */
-        LOG_DBG("[Process] Sink node, gradient fixed at 0");
+        /* Sink logic: Do nothing */
 #else
-        /* Regular node: update gradient based on best parent */
+        /* Regular node logic */
         if (rp_should_update_my_gradient(gradient_srv->gradient, best->gradient)) {
             uint8_t old_gradient = gradient_srv->gradient;
             uint8_t new_gradient = rp_compute_new_gradient(best->gradient);
             
-            /* Safety: Regular nodes cannot have gradient=0 (reserved for Gateway) */
-            if (new_gradient == 0) {
-                LOG_WRN("[Process] Prevented gradient=0 on non-sink node, using 1");
-                new_gradient = 1;
-            }
+            if (new_gradient == 0) new_gradient = 1;
             
             gradient_srv->gradient = new_gradient;
             
-            LOG_INF("[Process] Gradient updated: [%d] -> [%d]", 
-                   old_gradient, gradient_srv->gradient);
+            LOG_INF("[Process] Gradient updated: [%d] -> [%d] (Parent: 0x%04x)", 
+                    old_gradient, gradient_srv->gradient, best->addr);
             
-            /* Notify heartbeat module of gradient change */
+            /* Notify heartbeat - this handles the RESET internally */
             heartbeat_update_gradient(gradient_srv->gradient);
             
             bt_mesh_gradient_srv_gradient_send(gradient_srv);
@@ -308,13 +268,17 @@ static void gradient_process_handler(struct k_work *work)
 #endif
     }
     
-    LOG_INF("[Process] Gradient handling completed");
     gradient_ctx.gradient_srv = NULL;
 }
 
+/* ========================================================================= */
+/* Public Functions                              */
+/* ========================================================================= */
+
 void gradient_work_init(void)
 {
-    k_work_init_delayable(&initial_publish_work, initial_publish_handler);
+    /* Renamed initial_publish_work to publish_work for periodic use */
+    k_work_init_delayable(&publish_work, publish_handler);
     k_work_init_delayable(&gradient_process_work, gradient_process_handler);
     k_work_init_delayable(&cleanup_work, cleanup_handler);
 }
@@ -328,7 +292,8 @@ void gradient_work_start_cleanup(void)
 
 void gradient_work_schedule_initial_publish(void)
 {
-    k_work_schedule(&initial_publish_work, K_MSEC(INITIAL_PUBLISH_DELAY_MS));
+    /* Start the periodic publish cycle */
+    k_work_schedule(&publish_work, K_MSEC(INITIAL_PUBLISH_DELAY_MS));
 }
 
 void gradient_work_schedule_process(struct bt_mesh_gradient_srv *gradient_srv,

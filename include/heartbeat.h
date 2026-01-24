@@ -1,13 +1,11 @@
 /*
  * Copyright (c) 2024
  * SPDX-License-Identifier: Apache-2.0
- * 
- * Heartbeat Module for Gradient Routing
- * 
- * Purpose:
- * - Periodically send heartbeat packets to maintain reverse routes
- * - Ensures Gateway can always reach any node via BACKPROP_DATA
- * - Prevents route expiration in Reverse Routing Table
+ * * Heartbeat Module for Gradient Routing
+ * * Purpose:
+ * - Implements Adaptive Heartbeat mechanism (Fast -> Slow -> Maintenance)
+ * - Maintains reverse routes in the Gateway and upstream nodes
+ * - Automatically recovers connectivity when topology changes
  */
 
 #ifndef HEARTBEAT_H__
@@ -26,54 +24,57 @@ struct bt_mesh_gradient_srv;
 /**
  * @brief Initialize heartbeat module
  *
- * Sets up the work item and timer for periodic heartbeat transmission.
+ * Sets up the work item and timer.
  * Must be called once during system initialization.
- *
- * @note Does not start sending heartbeats immediately.
- *       Call heartbeat_start() after mesh is ready.
  */
 void heartbeat_init(void);
 
 /**
  * @brief Start heartbeat transmission
  *
- * Begins periodic heartbeat transmission after a random initial delay
- * to avoid all nodes sending heartbeats simultaneously.
+ * Begins the adaptive heartbeat cycle starting at FAST state (5s).
+ * Includes a random initial delay to avoid collision storm.
  *
- * @param srv Pointer to gradient server instance (for sending DATA packets)
+ * @param srv Pointer to gradient server instance
  *
- * @note Only starts if:
- *       - CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_ENABLED is set
- *       - Node is not Gateway (gradient != 0)
- *       - Node has been provisioned (has valid address)
+ * @note Only starts if node is NOT Gateway and Heartbeat is enabled in Kconfig.
  */
 void heartbeat_start(struct bt_mesh_gradient_srv *srv);
 
 /**
  * @brief Stop heartbeat transmission
  *
- * Stops the periodic heartbeat timer. Call this when:
- * - Node is reset/unprovisioned
- * - Node becomes Gateway (gradient changes to 0)
- * - System is shutting down
+ * Stops the timer. Call when node becomes Gateway or unprovisioned.
  */
 void heartbeat_stop(void);
 
 /**
  * @brief Update gradient value for heartbeat logic
  *
- * Called when node's gradient changes. If gradient becomes 0 (Gateway),
- * heartbeat will be automatically stopped.
+ * Called when node's gradient changes.
+ * - If new gradient is 0 (Gateway): Stops heartbeat.
+ * - If gradient changes (but not 0): Triggers a reset to FAST state.
  *
  * @param new_gradient New gradient value of this node
  */
 void heartbeat_update_gradient(uint8_t new_gradient);
 
 /**
+ * @brief Trigger a reset of the heartbeat cycle
+ * * Forces the heartbeat state machine back to FAST mode (5s interval)
+ * and schedules an immediate heartbeat packet.
+ * * Call this function when:
+ * - Gradient changes (Topology change)
+ * - Best Parent changes
+ * - Data transmission fails (Link break detected)
+ * - Loop is detected
+ */
+void heartbeat_trigger_reset(void);
+
+/**
  * @brief Check if heartbeat is currently active
  *
  * @return true if heartbeat timer is running
- * @return false if heartbeat is stopped or disabled
  */
 bool heartbeat_is_active(void);
 
