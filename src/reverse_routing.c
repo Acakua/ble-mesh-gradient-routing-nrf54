@@ -12,6 +12,28 @@
 
 LOG_MODULE_REGISTER(reverse_routing, LOG_LEVEL_DBG);
 
+/* * MEMORY OPTIMIZATION: USE MEMORY SLAB INSTEAD OF HEAP
+ * * Calculating total required nodes based on Kconfig limits.
+ * This prevents heap fragmentation on nRF54L15.
+ */
+#if defined(CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) && \
+    defined(CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST)
+    #define RRT_TOTAL_NODES (CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE * \
+                             CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST)
+#else
+    /* Fallback safe defaults if Kconfig is missing */
+    #define RRT_TOTAL_NODES (25 * 50) 
+#endif
+
+/* Fallback definition if header doesn't define it */
+#ifndef RRT_MAX_DEST_PER_NEXTHOP
+    #define RRT_MAX_DEST_PER_NEXTHOP CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST
+#endif
+
+/* Define the Memory Slab */
+K_MEM_SLAB_DEFINE(rrt_mem_slab, sizeof(backprop_node_t), RRT_TOTAL_NODES, 4);
+
+
 /*******************************************************************************
  * Helper Functions
  ******************************************************************************/
@@ -34,8 +56,7 @@ static bt_mesh_gradient_srv_forwarding_ctx *find_entry_by_addr(
 
 /**
  * @brief Find destination in a linked list
- * 
- * @return Pointer to node if found, NULL otherwise
+ * * @return Pointer to node if found, NULL otherwise
  */
 static backprop_node_t *find_dest_in_list(backprop_node_t *head, uint16_t dest_addr)
 {
@@ -51,8 +72,7 @@ static backprop_node_t *find_dest_in_list(backprop_node_t *head, uint16_t dest_a
 
 /**
  * @brief Remove destination from a linked list
- * 
- * @return true if removed, false if not found
+ * * @return true if removed, false if not found
  */
 static bool remove_dest_from_list(backprop_node_t **head, uint16_t dest_addr)
 {
@@ -66,7 +86,9 @@ static bool remove_dest_from_list(backprop_node_t **head, uint16_t dest_addr)
             } else {
                 prev->next = current->next;  /* Remove middle/tail node */
             }
-            k_free(current);
+            
+            /* CHANGED: Use slab free instead of k_free */
+            k_mem_slab_free(&rrt_mem_slab, (void **)&current);
             return true;
         }
         prev = current;
@@ -121,7 +143,9 @@ static void remove_oldest_from_list(backprop_node_t **head)
     }
     
     LOG_DBG("[RRT] Removed oldest dest 0x%04x to make room", oldest->addr);
-    k_free(oldest);
+    
+    /* CHANGED: Use slab free instead of k_free */
+    k_mem_slab_free(&rrt_mem_slab, (void **)&oldest);
 }
 
 /*******************************************************************************
@@ -138,6 +162,7 @@ void rrt_init(void *table, size_t table_size)
     }
     
     LOG_INF("[RRT] Initialized reverse routing table (%d entries)", table_size);
+    LOG_INF("[RRT] Memory Slab: %d blocks available", RRT_TOTAL_NODES);
 }
 
 int rrt_add_dest(void *table, size_t table_size,
@@ -168,11 +193,12 @@ int rrt_add_dest(void *table, size_t table_size,
         return 0;
     }
 
-    /* 3. It's a Move or New Add. ALLOCATE FIRST to prevent data loss. */
-    backprop_node_t *new_node = k_malloc(sizeof(backprop_node_t));
-    if (new_node == NULL) {
-        LOG_ERR("[RRT] Failed to allocate memory for backprop node. Keeping old route if any.");
-        return -ENOMEM; /* Abort before deleting anything */
+    /* 3. It's a Move or New Add. ALLOCATE FROM SLAB FIRST */
+    backprop_node_t *new_node;
+    if (k_mem_slab_alloc(&rrt_mem_slab, (void **)&new_node, K_NO_WAIT) != 0) {
+        LOG_ERR("[RRT] Memory Slab Full (%d nodes). Dropping route to 0x%04x", 
+                RRT_TOTAL_NODES, dest_addr);
+        return -ENOMEM; /* Abort cleanly */
     }
 
     /* 4. Now safe to remove from old location (Move operation) */
@@ -279,7 +305,10 @@ int rrt_cleanup_expired(void *table, size_t table_size,
                 LOG_INF("[RRT] Expired dest 0x%04x from nexthop 0x%04x (age=%lld ms)",
                         current->addr, ft[i].addr, age);
                 *pp = current->next;
-                k_free(current);
+                
+                /* CHANGED: Use slab free instead of k_free */
+                k_mem_slab_free(&rrt_mem_slab, (void **)&current);
+                
                 removed_count++;
             } else {
                 pp = &current->next;
@@ -344,7 +373,10 @@ void rrt_clear_entry(void *table, size_t table_size, size_t index)
     backprop_node_t *current = ft[index].backprop_dest;
     while (current != NULL) {
         backprop_node_t *next = current->next;
-        k_free(current);
+        
+        /* CHANGED: Use slab free instead of k_free */
+        k_mem_slab_free(&rrt_mem_slab, (void **)&current);
+        
         current = next;
     }
     
