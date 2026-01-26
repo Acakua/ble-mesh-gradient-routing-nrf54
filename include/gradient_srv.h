@@ -17,15 +17,27 @@ extern "C" {
 
 /** Gradient message opcode. */
 #define BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS BT_MESH_MODEL_OP_3(0x0A, \
-				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
 /** Data message opcode. */
 #define BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE BT_MESH_MODEL_OP_3(0x0B, \
-				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
 /** Backprop data message opcode (downlink from Gateway to nodes). */
 #define BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA BT_MESH_MODEL_OP_3(0x0C, \
-				       BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
+/* [NEW] Report Request opcode (Broadcast from Sink to Nodes - STOP & REPORT) */
+#define BT_MESH_GRADIENT_SRV_OP_REPORT_REQ BT_MESH_MODEL_OP_3(0x0D, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
+/* [NEW] Report Response opcode (Unicast from Node to Sink with TotalTx) */
+#define BT_MESH_GRADIENT_SRV_OP_REPORT_RSP BT_MESH_MODEL_OP_3(0x0E, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
+/* [NEW] Test Start opcode (Broadcast from Sink to Nodes - START) */
+#define BT_MESH_GRADIENT_SRV_OP_TEST_START BT_MESH_MODEL_OP_3(0x0F, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
 /* .. include_endpoint_gradient_srv_rst_1 */
 
@@ -40,8 +52,8 @@ extern "C" {
 
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE 1
 #define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE (\
-				     CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH \
-				     + 1) /* + \0 */
+                      CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH \
+                      + 1) /* + \0 */
 
 #ifndef CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS
 #define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS 30000  // 30 giây
@@ -49,8 +61,7 @@ extern "C" {
 
 /**
  * @brief Forwarding table context - alias to neighbor_entry_t
- * 
- * Uses neighbor_entry_t from gradient_types.h for consistency across modules.
+ * * Uses neighbor_entry_t from gradient_types.h for consistency across modules.
  */
 typedef neighbor_entry_t bt_mesh_gradient_srv_forwarding_ctx;
 
@@ -64,30 +75,47 @@ struct bt_mesh_gradient_srv;
  *
  * @param[in] _gradient Pointer to a @ref bt_mesh_gradient_srv instance.
  */
-#define BT_MESH_MODEL_GRADIENT_SRV(_gradient)                                          \
-		BT_MESH_MODEL_VND_CB(BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID,       \
-			BT_MESH_GRADIENT_SRV_VENDOR_MODEL_ID,                      \
-			_bt_mesh_gradient_srv_op, &(_gradient)->pub,                   \
-			BT_MESH_MODEL_USER_DATA(struct bt_mesh_gradient_srv,       \
-						_gradient),                        \
-			&_bt_mesh_gradient_srv_cb)
+#define BT_MESH_MODEL_GRADIENT_SRV(_gradient)                                  \
+        BT_MESH_MODEL_VND_CB(BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID,       \
+            BT_MESH_GRADIENT_SRV_VENDOR_MODEL_ID,                      \
+            _bt_mesh_gradient_srv_op, &(_gradient)->pub,                   \
+            BT_MESH_MODEL_USER_DATA(struct bt_mesh_gradient_srv,       \
+                        _gradient),                        \
+            &_bt_mesh_gradient_srv_cb)
 /* .. include_endpoint_gradient_srv_rst_2 */
 
 /** Bluetooth Mesh Chat Client model handlers. */
 struct bt_mesh_gradient_srv_handlers {
-	/** @brief Called after the node has been provisioned, or after all
-	 * mesh data has been loaded from persistent storage.
-	 *
-	 * @param[in] cli Chat Client instance that has been started.
-	 */
-	void (*const start)(struct bt_mesh_gradient_srv *chat);
+    /** @brief Called after the node has been provisioned, or after all
+     * mesh data has been loaded from persistent storage.
+     *
+     * @param[in] cli Chat Client instance that has been started.
+     */
+    void (*const start)(struct bt_mesh_gradient_srv *chat);
 
-	/** @brief Called when BACKPROP_DATA is received and this node is the destination.
-	 *
-	 * @param[in] srv Gradient server instance.
-	 * @param[in] data The received data payload.
-	 */
-	void (*const data_received)(struct bt_mesh_gradient_srv *srv, uint16_t data);
+    /** @brief Called when BACKPROP_DATA is received and this node is the destination.
+     *
+     * @param[in] srv Gradient server instance.
+     * @param[in] data The received data payload.
+     */
+    void (*const data_received)(struct bt_mesh_gradient_srv *srv, uint16_t data);
+
+    /** [NEW] Called when REPORT_REQ is received (Triggered on Sensor Nodes)
+     *
+     * The application should handle this by stopping transmission and 
+     * sending back a REPORT_RSP containing the Total Transmitted Count.
+     *
+     * @param[in] srv Gradient server instance.
+     */
+    void (*const report_req_received)(struct bt_mesh_gradient_srv *srv);
+
+    /** [NEW] Called when TEST_START is received (Triggered on Sensor Nodes)
+     *
+     * The application should handle this by starting the periodic data transmission.
+     *
+     * @param[in] srv Gradient server instance.
+     */
+    void (*const test_start_received)(struct bt_mesh_gradient_srv *srv);
 };
 
 /* .. include_startingpoint_gradient_srv_rst_3 */
@@ -95,26 +123,26 @@ struct bt_mesh_gradient_srv_handlers {
  * Bluetooth Mesh Chat Client model context.
  */
 struct bt_mesh_gradient_srv {
-	/** Access model pointer. */
-	const struct bt_mesh_model *model;
-	/** Publish parameters. */
-	struct bt_mesh_model_pub pub;
-	/** Publication message. */
-	struct net_buf_simple pub_msg;
-	/** Publication message buffer. */
-	uint8_t buf[BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS,
-					  BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE)];
-	/** Handler function structure. */
-	const struct bt_mesh_gradient_srv_handlers *handlers;
+    /** Access model pointer. */
+    const struct bt_mesh_model *model;
+    /** Publish parameters. */
+    struct bt_mesh_model_pub pub;
+    /** Publication message. */
+    struct net_buf_simple pub_msg;
+    /** Publication message buffer. */
+    uint8_t buf[BT_MESH_MODEL_BUF_LEN(BT_MESH_GRADIENT_SRV_OP_GRADIENT_STATUS,
+                      BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE)];
+    /** Handler function structure. */
+    const struct bt_mesh_gradient_srv_handlers *handlers;
 
-	uint8_t gradient;
+    uint8_t gradient;
 
-	/** Mutex to protect forwarding table access */
-	struct k_mutex forwarding_table_mutex;
+    /** Mutex to protect forwarding table access */
+    struct k_mutex forwarding_table_mutex;
 
-	bt_mesh_gradient_srv_forwarding_ctx
-		forwarding_table[
-			CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE];
+    bt_mesh_gradient_srv_forwarding_ctx
+        forwarding_table[
+            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE];
 };
 /* .. include_endpoint_gradient_srv_rst_3 */
 
@@ -142,8 +170,8 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
  * @retval -EAGAIN The device has not been provisioned.
  */
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
-					  uint16_t addr,
-					  uint16_t data);
+                      uint16_t addr,
+                      uint16_t data);
 
 /** @brief Send BACKPROP_DATA to a specific destination.
  *
@@ -162,6 +190,38 @@ int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
 int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv,
                                        uint16_t dest_addr,
                                        uint16_t payload);
+
+/** @brief [NEW] Broadcast a REPORT REQUEST to all nodes.
+ *
+ * This function should be called by the SINK NODE to trigger the 
+ * end-of-test reporting phase (STOP).
+ *
+ * @param gradient_srv Pointer to gradient server instance.
+ * @retval 0 Successfully sent.
+ */
+int bt_mesh_gradient_srv_send_report_req(struct bt_mesh_gradient_srv *gradient_srv);
+
+/** @brief [NEW] Broadcast a TEST START command to all nodes.
+ *
+ * This function should be called by the SINK NODE to trigger the 
+ * start of data transmission.
+ *
+ * @param gradient_srv Pointer to gradient server instance.
+ * @retval 0 Successfully sent.
+ */
+int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *gradient_srv);
+
+/** @brief [NEW] Send a REPORT RESPONSE (Unicast) to the Sink.
+ *
+ * This function should be called by the SENSOR NODE to report its
+ * Total Transmitted Count (PDR calculation).
+ *
+ * @param gradient_srv Pointer to gradient server instance.
+ * @param total_tx Total packets sent during the test.
+ * @retval 0 Successfully sent.
+ */
+int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_srv, 
+                                         uint16_t total_tx);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

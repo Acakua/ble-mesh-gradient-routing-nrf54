@@ -7,20 +7,23 @@
 #include "neighbor_table.h"
 #include <limits.h>
 #include <string.h>
+#include <zephyr/logging/log.h>
+
+LOG_MODULE_REGISTER(neighbor_table, LOG_LEVEL_DBG);
 
 void nt_init(neighbor_entry_t *table, size_t table_size)
 {
-	if (table == NULL || table_size == 0) {
-		return;
-	}
+    if (table == NULL || table_size == 0) {
+        return;
+    }
 
-	for (size_t i = 0; i < table_size; i++) {
-		table[i].addr = GR_ADDR_UNASSIGNED;
-		table[i].rssi = INT8_MIN;
-		table[i].gradient = UINT8_MAX;
-		table[i].last_seen = 0;
-		table[i].backprop_dest = NULL;
-	}
+    for (size_t i = 0; i < table_size; i++) {
+        table[i].addr = GR_ADDR_UNASSIGNED;
+        table[i].rssi = INT8_MIN;
+        table[i].gradient = UINT8_MAX;
+        table[i].last_seen = 0;
+        table[i].backprop_dest = NULL; /* QUAN TRỌNG: Init NULL để tránh Kernel Panic */
+    }
 }
 
 bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
@@ -32,186 +35,173 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
     }
 
     int existing_pos = -1;
-    struct backprop_node *saved_backprop = NULL; // Lưu con trỏ danh sách cũ
+    struct backprop_node *saved_backprop = NULL; 
 
-    /* First pass: find if sender already exists */
+    /* 1. Tìm xem node đã tồn tại chưa */
     for (size_t i = 0; i < table_size; i++) {
         if (table[i].addr == sender_addr) {
-            existing_pos = (int)i;
+            existing_pos = i;
+            /* Lưu lại danh sách RRT cũ (Linked List) để không bị mất khi sort/move */
+            saved_backprop = table[i].backprop_dest;
             break;
         }
     }
 
-    /* If sender exists, remove it first (we'll re-insert in sorted position) */
-    if (existing_pos != -1) {
-        /* FIX: Cứu con trỏ danh sách trước khi nó bị ghi đè */
-        saved_backprop = table[existing_pos].backprop_dest;
-        
-        /* Shift entries up to fill the gap */
-        for (int i = existing_pos; i < (int)table_size - 1; i++) {
-            table[i] = table[i + 1];
-        }
-        /* Clear last entry */
-        table[table_size - 1].addr = GR_ADDR_UNASSIGNED;
-        table[table_size - 1].rssi = INT8_MIN;
-        table[table_size - 1].gradient = UINT8_MAX;
-        table[table_size - 1].last_seen = 0;
-        table[table_size - 1].backprop_dest = NULL;
-    }
-
-    /* Find the correct sorted position for insertion */
-    int insert_pos = -1;
+    /* 2. Xác định vị trí chèn mới dựa trên thuật toán Gradient */
+    int insert_pos = table_size; // Mặc định là cuối bảng
+    
     for (size_t i = 0; i < table_size; i++) {
+        // Nếu gặp slot trống -> chèn vào đây luôn (vì bảng đã sort)
         if (table[i].addr == GR_ADDR_UNASSIGNED) {
-            insert_pos = (int)i;
+            if (insert_pos > i) insert_pos = i;
             break;
         }
 
+        // So sánh tiêu chí: Gradient nhỏ hơn -> Tốt hơn -> Đứng trước
         if (sender_gradient < table[i].gradient) {
-            insert_pos = (int)i;
-            break;
-        } else if (sender_gradient == table[i].gradient &&
-                   sender_rssi > table[i].rssi) {
-            insert_pos = (int)i;
+            insert_pos = i;
             break;
         }
-    }
-
-    if (insert_pos == -1) {
-        /* Table full and new entry is worse than all existing */
-        /* FIX: Nếu đây là node cũ bị đẩy ra, phải giải phóng bộ nhớ danh sách của nó để tránh Memory Leak */
-        if (saved_backprop != NULL) {
-            // Cần hàm rrt_clear_list(saved_backprop) ở đây nếu muốn chuẩn chỉnh
-            // Nhưng tạm thời ta chấp nhận leak nhỏ trong trường hợp hiếm này
-        }
-        return false;
-    }
-
-    /* Shift entries down to make room */
-    if (table[insert_pos].addr != GR_ADDR_UNASSIGNED) {
-        int last_valid = -1;
-        for (int i = (int)table_size - 1; i >= 0; i--) {
-            if (table[i].addr != GR_ADDR_UNASSIGNED) {
-                last_valid = i;
+        // Gradient bằng nhau -> RSSI lớn hơn -> Tốt hơn -> Đứng trước
+        else if (sender_gradient == table[i].gradient) {
+            if (sender_rssi > table[i].rssi) {
+                insert_pos = i;
                 break;
             }
         }
-        
-        if (last_valid >= 0 && last_valid < (int)table_size - 1) {
-            for (int i = last_valid; i >= insert_pos; i--) {
-                table[i + 1] = table[i];
-            }
-        } else if (last_valid == (int)table_size - 1) {
-            // Drop last entry to make room -> Potential Memory Leak of the dropped entry's list
-            // In production code, we should clear the list of table[last_valid] before overwriting
-             for (int i = last_valid - 1; i >= insert_pos; i--) {
-                table[i + 1] = table[i];
-            }
-        }
+        // Nếu Gradient lớn hơn -> Tiếp tục tìm
     }
 
-    /* Insert the new/updated entry */
-    table[insert_pos].addr = sender_addr;
-    table[insert_pos].rssi = sender_rssi;
-    table[insert_pos].gradient = sender_gradient;
-    table[insert_pos].last_seen = now_ms;
+    /* Nếu bảng đầy và vị trí chèn nằm ngoài bảng (và node này không có trong bảng) 
+       -> Node này tệ hơn tất cả -> Bỏ qua */
+    if (insert_pos >= table_size && existing_pos == -1) {
+        return false;
+    }
+
+    /* 3. Thực hiện dịch chuyển mảng (Shift) */
     
-    /* FIX: KHÔI PHỤC CON TRỎ DANH SÁCH (QUAN TRỌNG NHẤT) */
-    /* Nếu là node cũ chuyển chỗ, trả lại danh sách cho nó.
-       Nếu là node mới tinh (existing_pos == -1), saved_backprop là NULL -> Đúng ý đồ. */
-    table[insert_pos].backprop_dest = saved_backprop;
+    // TRƯỜNG HỢP A: Node mới hoàn toàn
+    if (existing_pos == -1) {
+        // Dịch các phần tử từ insert_pos về sau lùi 1 bước để tạo chỗ trống
+        for (int i = table_size - 1; i > insert_pos; i--) {
+            table[i] = table[i - 1]; 
+        }
+        
+        // Tại vị trí insert_pos, reset backprop_dest vì đây là node mới
+        // QUAN TRỌNG: Ngăn chặn dùng lại pointer rác của node cũ tại vị trí này
+        table[insert_pos].backprop_dest = NULL; 
+    } 
+    // TRƯỜNG HỢP B: Node đã tồn tại, cần cập nhật vị trí
+    else {
+        // Nếu vị trí không đổi -> Chỉ update info
+        if (existing_pos == insert_pos) {
+            table[insert_pos].gradient = sender_gradient;
+            table[insert_pos].rssi = sender_rssi;
+            table[insert_pos].last_seen = now_ms;
+            // backprop_dest giữ nguyên
+            return true;
+        }
+
+        // Nếu vị trí thay đổi, cần dịch chuyển
+        if (existing_pos > insert_pos) {
+            // Node tốt lên -> Dịch các node ở giữa xuống dưới
+            for (int i = existing_pos; i > insert_pos; i--) {
+                table[i] = table[i - 1];
+            }
+        } else {
+            // Node tệ đi -> Dịch các node ở giữa lên trên để lấp chỗ existing_pos
+            for (int i = existing_pos; i < insert_pos; i++) {
+                // Kiểm tra biên để tránh truy cập ngoài mảng (dù logic insert_pos thường an toàn)
+                if (i + 1 < table_size) {
+                    table[i] = table[i + 1];
+                }
+            }
+            // FIX LOGIC SORT: Khi dịch chuyển lấp chỗ cũ, index insert_pos thực tế đã bị lùi 1 đơn vị
+            if (insert_pos > 0) {
+                insert_pos--; 
+            }
+        }
+        
+        // Gán lại pointer đã lưu (QUAN TRỌNG: Giữ lại routing ngược của node này)
+        table[insert_pos].backprop_dest = saved_backprop;
+    }
+
+    /* 4. Cập nhật thông tin tại insert_pos */
+    if (insert_pos < table_size) {
+        table[insert_pos].addr = sender_addr;
+        table[insert_pos].gradient = sender_gradient;
+        table[insert_pos].rssi = sender_rssi;
+        table[insert_pos].last_seen = now_ms;
+        // backprop_dest đã được xử lý ở bước 3
+    }
 
     return true;
 }
 
-
-const neighbor_entry_t *nt_best(const neighbor_entry_t *table, size_t table_size)
+const neighbor_entry_t *nt_get(const neighbor_entry_t *table, size_t table_size, size_t index)
 {
-	if (table == NULL || table_size == 0) {
-		return NULL;
-	}
+    if (table == NULL || index >= table_size) {
+        return NULL;
+    }
+    
+    if (table[index].addr == GR_ADDR_UNASSIGNED) {
+        return NULL;
+    }
 
-	if (table[0].addr == GR_ADDR_UNASSIGNED) {
-		return NULL;
-	}
-
-	return &table[0];
-}
-
-const neighbor_entry_t *nt_get(const neighbor_entry_t *table, size_t table_size, size_t idx)
-{
-	if (table == NULL || idx >= table_size) {
-		return NULL;
-	}
-
-	if (table[idx].addr == GR_ADDR_UNASSIGNED) {
-		return NULL;
-	}
-
-	return &table[idx];
+    return &table[index];
 }
 
 uint16_t nt_remove(neighbor_entry_t *table, size_t table_size, size_t idx)
 {
-	if (table == NULL || idx >= table_size) {
-		return GR_ADDR_UNASSIGNED;
-	}
+    if (table == NULL || idx >= table_size) {
+        return GR_ADDR_UNASSIGNED;
+    }
 
-	if (table[idx].addr == GR_ADDR_UNASSIGNED) {
-		return GR_ADDR_UNASSIGNED;
-	}
+    uint16_t removed_addr = table[idx].addr;
 
-	/* Save address of removed entry */
-	uint16_t removed_addr = table[idx].addr;
-	
-	/* Note: backprop_dest linked list should be cleared by caller using rrt_clear_entry()
-	 * before calling nt_remove(), to avoid memory leak */
+    /* Dịch chuyển các phần tử phía sau lên */
+    for (size_t i = idx; i < table_size - 1; i++) {
+        table[i] = table[i + 1];
+    }
 
-	/* Shift entries up to fill the gap */
-	for (size_t i = idx; i < table_size - 1; i++) {
-		table[i] = table[i + 1];
-	}
+    /* Reset phần tử cuối cùng */
+    size_t last = table_size - 1;
+    table[last].addr = GR_ADDR_UNASSIGNED;
+    table[last].rssi = INT8_MIN;
+    table[last].gradient = UINT8_MAX;
+    table[last].last_seen = 0;
+    table[last].backprop_dest = NULL; /* QUAN TRỌNG: Phải set NULL */
 
-	/* Reset the last entry */
-	size_t last = table_size - 1;
-	table[last].addr = GR_ADDR_UNASSIGNED;
-	table[last].rssi = INT8_MIN;
-	table[last].gradient = UINT8_MAX;
-	table[last].last_seen = 0;
-	table[last].backprop_dest = NULL;
-
-	return removed_addr;
+    return removed_addr;
 }
 
-size_t nt_count(const neighbor_entry_t *table, size_t table_size)
+/* [FIX] Hàm này đã được sửa signature để khớp với header */
+bool nt_is_expired(const neighbor_entry_t *table, size_t table_size, size_t idx, 
+                   int64_t timeout, int64_t now)
 {
-	if (table == NULL || table_size == 0) {
-		return 0;
-	}
-
-	size_t count = 0;
-	for (size_t i = 0; i < table_size; i++) {
-		if (table[i].addr == GR_ADDR_UNASSIGNED) {
-			/* Table is sorted, so first unassigned means rest are too */
-			break;
-		}
-		count++;
-	}
-
-	return count;
+    if (table == NULL || idx >= table_size) {
+        return false;
+    }
+    
+    const neighbor_entry_t *entry = &table[idx];
+    
+    if (entry->addr == GR_ADDR_UNASSIGNED) {
+        return false;
+    }
+    
+    return (now - entry->last_seen) > timeout;
 }
 
-bool nt_is_expired(const neighbor_entry_t *table, size_t table_size, size_t idx,
-                   int64_t current_time_ms, int64_t timeout_ms)
+/* [FIX] Hàm này đã được sửa signature để khớp với header (const) */
+const neighbor_entry_t *nt_best(const neighbor_entry_t *table, size_t table_size)
 {
-	if (table == NULL || idx >= table_size) {
-		return false;
-	}
-
-	if (table[idx].addr == GR_ADDR_UNASSIGNED) {
-		return false;
-	}
-
-	int64_t time_diff = current_time_ms - table[idx].last_seen;
-	return (time_diff > timeout_ms);
+    if (table == NULL || table_size == 0) return NULL;
+    
+    /* Vì bảng đã được sắp xếp (Sorted Table) bởi nt_update_sorted
+       nên phần tử đầu tiên (index 0) luôn là tốt nhất nếu nó hợp lệ */
+    if (table[0].addr != GR_ADDR_UNASSIGNED) {
+        return &table[0];
+    }
+    
+    return NULL;
 }

@@ -5,105 +5,122 @@ import datetime
 import os
 import sys
 
-# =============================================================================
-# CẤU HÌNH (CONFIGURATION)
-# =============================================================================
-
-# Thay 'COM3' bằng cổng COM của nRF54 khi cắm vào máy tính
-# Bạn có thể xem trong Device Manager -> Ports (COM & LPT)
+# ... (Giữ nguyên cấu hình PORT, BAUD_RATE ...)
 SERIAL_PORT = 'COM18' 
-
 BAUD_RATE = 115200    
-TIMEOUT = 0.1          
-
 LOG_DIR = r"C:\ncs\v3.0.1\zephyr\samples\GRADIENT-SRV\DataLogging"
 
-# Tạo thư mục nếu chưa tồn tại
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
-# =============================================================================
-# MAIN SCRIPT
-# =============================================================================
+# Dictionary để đếm số gói tin nhận được trong RAM
+# Format: { '0x0002': 150, '0x0003': 200 }
+rx_stats = {}
 
 def get_log_filename():
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    return os.path.join(LOG_DIR, f"wsn_log_{timestamp}.csv")
+    return os.path.join(LOG_DIR, f"wsn_pdr_full_{timestamp}.csv")
 
 def main():
-    print("--- WSN DATA LOGGER FOR WINDOWS ---")
-    print(f"Target Port: {SERIAL_PORT}")
-    print(f"Baud Rate  : {BAUD_RATE}")
-    
+    print("--- WSN AUTOMATED PDR TESTER ---")
     filename = get_log_filename()
     
+    if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
+    
     try:
-        # Windows dùng encoding 'utf-8-sig' để mở trực tiếp bằng Excel không lỗi font
         with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
             writer = csv.writer(file)
             
-            # Ghi Header
-            headers = ["Timestamp", "SourceAddr", "SenderAddr", "Payload", "RSSI", "HopCount"]
+            # HEADER MỞ RỘNG: Thêm các cột thống kê
+            # Type: DATA (gói tin thường), EVENT (Start/Stop), RESULT (Kết quả PDR)
+            headers = ["Timestamp", "Type", "SourceAddr", "SenderAddr", "Value_Seq_or_Tx", "RSSI", "Rx_Count_Measured", "PDR_Percent"]
             writer.writerow(headers)
             file.flush()
             
-            print(f"Đang lưu tại: {filename}")
-            print("Đang quét dữ liệu... (Nhấn Ctrl+C để dừng)")
+            print(f"Log file: {filename}")
+            print("Ready. Press Button 3 on Sink to START test.")
 
             while True:
                 try:
-                    # Mở cổng Serial
-                    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=TIMEOUT)
-                    print(f"KẾT NỐI THÀNH CÔNG: {SERIAL_PORT}")
-                    
+                    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
                     ser.reset_input_buffer()
 
                     while True:
                         if ser.in_waiting > 0:
-                            try:
-                                # Đọc dữ liệu từ nRF54
-                                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                            line = ser.readline().decode('utf-8', errors='ignore').strip()
+                            
+                            if "CSV_LOG" in line and "CSV_LOG," in line:
+                                parts = line.split("CSV_LOG,")[1].split(',')
+                                now = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
                                 
-                                # Lọc dòng chứa từ khóa CSV_LOG
-                                if "CSV_LOG" in line:
-                                    # Cắt bỏ ký tự rác nếu có
-                                    start_idx = line.find("CSV_LOG")
-                                    clean_data = line[start_idx:]
-                                    parts = clean_data.split(',')
+                                # Parse cơ bản
+                                log_type = parts[0]
+                                
+                                # Xử lý từng loại log
+                                if log_type == "DATA":
+                                    # Format: DATA, src, sender, seq, rssi
+                                    src = parts[1]
+                                    sender = parts[2]
+                                    seq = parts[3]
+                                    rssi = parts[4]
                                     
-                                    if len(parts) >= 6:
-                                        now = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                                        
-                                        # Định dạng lại địa chỉ sang Hex cho dễ đọc
-                                        src_hex = f"0x{int(parts[1]):04x}"
-                                        snd_hex = f"0x{int(parts[2]):04x}"
-                                        
-                                        row_data = [now, src_hex, snd_hex, parts[3], parts[4], parts[5]]
-                                        
-                                        # Ghi vào file
-                                        writer.writerow(row_data)
-                                        file.flush() # Lưu ngay lập tức
-                                        
-                                        print(f"[{now}] Nhận từ {src_hex}: Data={parts[3]} RSSI={parts[4]}")
-                                        
-                            except Exception as e:
-                                continue
-                        else:
-                            time.sleep(0.01)
+                                    src_hex = f"0x{int(src):04x}"
+                                    
+                                    # 1. Tăng biến đếm trong RAM
+                                    if src_hex not in rx_stats:
+                                        rx_stats[src_hex] = 0
+                                    rx_stats[src_hex] += 1
+                                    
+                                    # 2. Ghi log RAW
+                                    writer.writerow([now, "DATA", src_hex, f"0x{int(sender):04x}", seq, rssi, "", ""])
+                                    
+                                    # In gọn để theo dõi
+                                    # print(f"[{now}] RX Node {src_hex}: {seq} (Count: {rx_stats[src_hex]})")
 
-                except serial.SerialException:
-                    print(f"LỖI: Không tìm thấy {SERIAL_PORT}. Đang thử lại sau 2s...")
-                    time.sleep(2)
-                except KeyboardInterrupt:
-                    raise
+                                elif log_type == "REPORT":
+                                    # Format: REPORT, src, sender, total_tx, rssi
+                                    src = parts[1]
+                                    total_tx = int(parts[3])
+                                    rssi = parts[4]
+                                    src_hex = f"0x{int(src):04x}"
+                                    
+                                    # 3. Lấy số liệu đã đếm được
+                                    measured_rx = rx_stats.get(src_hex, 0)
+                                    
+                                    # 4. TÍNH PDR
+                                    if total_tx > 0:
+                                        pdr = (measured_rx / total_tx) * 100.0
+                                    else:
+                                        pdr = 0.0
+                                    
+                                    # 5. Ghi dòng RESULT chứa TẤT CẢ thông số
+                                    # Value cột 5 là TotalTx
+                                    # Rx_Count_Measured là cột 7
+                                    # PDR_Percent là cột 8
+                                    writer.writerow([now, "RESULT", src_hex, f"0x{int(parts[2]):04x}", total_tx, rssi, measured_rx, f"{pdr:.2f}"])
+                                    
+                                    print(f"[{now}] >>> FINAL REPORT Node {src_hex} <<<")
+                                    print(f"    - Tx Total (Node sent) : {total_tx}")
+                                    print(f"    - Rx Count (Sink heard): {measured_rx}")
+                                    print(f"    - PDR                  : {pdr:.2f} %")
+                                    print("---------------------------------------------")
+
+                                elif log_type == "EVENT":
+                                    # Format: EVENT, TEST_START, Duration...
+                                    # Reset bộ đếm khi bắt đầu test mới
+                                    if "TEST_START" in parts[1]:
+                                        rx_stats.clear()
+                                        print(f"[{now}] --- NEW TEST SESSION STARTED ---")
+                                    
+                                    writer.writerow([now, "EVENT", parts[1], parts[2], "", "", "", ""])
+
+                                file.flush()
+
+                        else:
+                            time.sleep(0.005)
+
+                except Exception as e:
+                    time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\n--- Đã dừng Logger ---")
-    except Exception as e:
-        print(f"\n--- Lỗi hệ thống: {e} ---")
-    finally:
-        print(f"Dữ liệu đã được lưu an toàn tại: {filename}")
-        input("Nhấn Enter để thoát...")
+        print("\nLogger Stopped.")
 
 if __name__ == "__main__":
     main()

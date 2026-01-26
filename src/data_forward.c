@@ -36,17 +36,17 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
 
 /**
  * @brief Find the BEST Parent strictly for Uplink Routing
- * 
- * Scans the entire table to find a neighbor with:
+ * * [CHANGED]: Removed 'static' keyword so gradient_srv.c can use this function
+ * to route REPORT_RSP packets.
+ * * Scans the entire table to find a neighbor with:
  * 1. Gradient < My Gradient (CRITICAL CONDITION)
  * 2. Best Gradient among valid candidates
  * 3. Best RSSI among ties
- * 
- * @param srv Pointer to gradient server
+ * * @param srv Pointer to gradient server
  * @param exclude_addr Address to exclude (e.g., the sender)
  * @return Pointer to best entry, or NULL if no VALID PARENT found.
  */
-static const neighbor_entry_t *find_strict_upstream_parent(
+const neighbor_entry_t *find_strict_upstream_parent(
     struct bt_mesh_gradient_srv *srv, uint16_t exclude_addr)
 {
     const neighbor_entry_t *best_candidate = NULL;
@@ -131,7 +131,7 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
     net_buf_simple_add_le16(&buf, original_source);
     net_buf_simple_add_le16(&buf, data);
     
-    LOG_DBG("[TX] Sending to 0x%04x: original_src=0x%04x, data=%d", 
+    LOG_DBG("[TX] Sending to 0x%04x: original_src=0x%04x, Seq/Data=%d", 
             addr, original_source, data);
     
     return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
@@ -177,8 +177,8 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
     data_send_ctx.target_addr = best_parent->addr;
     data_send_ctx.active = true;
     
-    LOG_INF("[Forward] Selected PARENT 0x%04x (Grad: %d) for forwarding", 
-            best_parent->addr, best_parent->gradient);
+    LOG_INF("[Forward] Selected PARENT 0x%04x (Grad: %d) for forwarding Seq: %d", 
+            best_parent->addr, best_parent->gradient, data);
     
     int err = data_send_internal(gradient_srv, best_parent->addr, original_source, data);
     if (err) {
@@ -218,7 +218,7 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     data_send_ctx.target_addr = nexthop;
     data_send_ctx.active = true;
     
-    LOG_INF("[Direct] Sending data %d to PARENT 0x%04x (Grad: %d)", 
+    LOG_INF("[Direct] Sending Seq: %d to PARENT 0x%04x (Grad: %d)", 
             data, nexthop, best_parent->gradient);
     
     int err = data_send_internal(gradient_srv, nexthop, my_addr, data);
