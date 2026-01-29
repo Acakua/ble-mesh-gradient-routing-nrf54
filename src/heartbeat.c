@@ -14,7 +14,7 @@
 #include "data_forward.h"
 #include "packet_stats.h"
 
-LOG_MODULE_REGISTER(heartbeat, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(heartbeat, LOG_LEVEL_INF);
 
 /*============================================================================*/
 /* Configuration                                 */
@@ -114,7 +114,7 @@ static void heartbeat_work_handler(struct k_work *work)
     /* * [THÊM ĐÁNH NHÃN LOG TẠI ĐÂY]
      * In log đánh nhãn CONTROL trước khi gửi gói tin Heartbeat 
      */
-    LOG_INF("[CONTROL] Sending Heartbeat (0xFFFF)");
+    LOG_DBG("[CONTROL] Sending Heartbeat (0xFFFF)");
 
     /* * Send heartbeat DATA packet via Unicast to Best Parent.
      * data_forward_send_direct handles looking up the parent.

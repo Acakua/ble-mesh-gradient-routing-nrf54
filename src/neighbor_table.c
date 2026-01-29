@@ -9,7 +9,7 @@
 #include <string.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(neighbor_table, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(neighbor_table, LOG_LEVEL_INF);
 
 void nt_init(neighbor_entry_t *table, size_t table_size)
 {

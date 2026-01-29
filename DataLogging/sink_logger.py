@@ -6,7 +6,7 @@ import os
 import sys
 
 # --- CẤU HÌNH ---
-SERIAL_PORT = 'COM29'  # Đảm bảo đúng cổng COM của bạn
+SERIAL_PORT = 'COM32'  # Đảm bảo đúng cổng COM của bạn
 BAUD_RATE = 115200
 LOG_DIR = r"C:\ncs\v3.0.1\zephyr\samples\GRADIENT-SRV\DataLogging"
 

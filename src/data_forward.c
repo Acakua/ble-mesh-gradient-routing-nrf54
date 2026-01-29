@@ -12,7 +12,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(data_forward, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(data_forward, LOG_LEVEL_INF);
 
 /* Timing constants */
 #define DATA_RETRY_DELAY_MS  100  /* 100ms */
@@ -108,7 +108,10 @@ static void data_send_end_cb(int err, void *user_data)
            Retrying blindly causes loops. We just fail. 
            Reliability is handled by upper layers or next periodic send. */
     } else {
-        pkt_stats_inc_data_tx();
+        /* [FIX] Không đếm Heartbeat vào thống kê DATA */
+        if (data_send_ctx.data != 0xFFFF) {
+            pkt_stats_inc_data_tx();
+        }
         LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
     }
     

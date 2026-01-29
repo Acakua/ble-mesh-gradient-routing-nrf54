@@ -15,7 +15,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/random/random.h>
 
-LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_INF);
 
 /* -------------------------------------------------------------------------
  * DEFINES

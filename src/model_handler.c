@@ -24,7 +24,7 @@
 #include "heartbeat.h"
 #include "packet_stats.h" // [FIX] Thêm header này để dùng pkt_stats
 
-LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
 
 /* ==========================================
  * CẤU HÌNH TEST (TEST CONFIGURATION)
@@ -34,14 +34,15 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_DBG);
 #define TEST_DURATION_MS        (TEST_DURATION_MINUTES * 60 * 1000) 
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 4000  // Tăng lên 2 giây để giảm nghẽn mạng
+#define SENSOR_SEND_INTERVAL_MS 2000  // Tăng lên 2 giây để giảm nghẽn mạng
 
 /* ==========================================
  * GLOBALS & WORK ITEMS
  * ========================================== */
 static const struct shell *chat_shell;
-uint16_t g_total_tx_count = 0; // Biến đếm SeqNum (Application Layer)
-uint32_t g_test_start_time = 0; // [NEW] Lưu thời điểm bắt đầu phiên test
+uint16_t g_total_tx_count = 0; // Biến đếm SeqNum toàn cục (cho cả HB và DATA)
+uint16_t g_test_data_tx_count = 0; // [NEW] Chỉ đếm gói DATA trong phiên test
+uint32_t g_test_start_time = 0; 
 
 // [NEW] Biến chống rung phím (Debounce)
 static int64_t last_action_time = 0;
@@ -114,6 +115,7 @@ static void handle_test_start_received(struct bt_mesh_gradient_srv *srv)
     
     /* 1. Reset biến đếm và lưu thời điểm bắt đầu */
     g_total_tx_count = 0; 
+    g_test_data_tx_count = 0; // Reset đếm gói test
     g_test_start_time = k_uptime_get_32();
     pkt_stats_reset();
     
@@ -146,6 +148,12 @@ static void handle_report_req_received(struct bt_mesh_gradient_srv *srv)
     is_sending_active = false; 
     k_work_cancel_delayable(&send_data_work);
     led_indicate_attention(false);
+    
+    /* [FIX PDR > 100%] Lấy số gói DATA thực tế đã gửi để báo cáo */
+    struct packet_stats stats;
+    pkt_stats_get(&stats);
+    
+    LOG_INF(">>> TEST STOPPED. Reported DATA Tx: %u <<<", g_test_data_tx_count);
     
     /* 2. LOGIC JITTER: Đợi một khoảng thời gian ngẫu nhiên trước khi báo cáo 
      * để tránh "nghẽn cổ chai" tại các nexthop gần Gateway.
@@ -324,10 +332,11 @@ static void send_data_handler(struct k_work *work)
     }
 
     if (has_route) {
-        g_total_tx_count++; // Tăng SeqNum
+        g_total_tx_count++; // Tăng SeqNum toàn cục
+        g_test_data_tx_count++; // Tăng số gói DATA của bài test
         uint16_t dest_addr = gradient_srv.forwarding_table[0].addr; 
 
-        LOG_INF("[AUTO-SEND] Data Seq=%u -> 0x%04x", g_total_tx_count, dest_addr);
+        LOG_DBG("[AUTO-SEND] Data Seq=%u -> 0x%04x", g_total_tx_count, dest_addr);
         
         /* [RELATIVE TIMESTAMP] Gửi thời gian tương đối tính từ lúc bắt đầu test */
         uint32_t timestamp = k_uptime_get_32() - (g_test_start_time > 0 ? g_test_start_time : k_uptime_get_32());

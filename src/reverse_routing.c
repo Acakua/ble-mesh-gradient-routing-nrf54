@@ -10,7 +10,7 @@
 #include <zephyr/logging/log.h>
 #include <errno.h>
 
-LOG_MODULE_REGISTER(reverse_routing, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(reverse_routing, LOG_LEVEL_INF);
 
 /* * MEMORY OPTIMIZATION: USE MEMORY SLAB INSTEAD OF HEAP
  * * Calculating total required nodes based on Kconfig limits.
