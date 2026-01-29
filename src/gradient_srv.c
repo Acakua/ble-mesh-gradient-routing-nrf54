@@ -411,22 +411,59 @@ static void report_retry_handler(struct k_work *work)
     net_buf_simple_add_le16(&msg, (uint16_t)stats.heartbeat_tx);
     net_buf_simple_add_le16(&msg, (uint16_t)stats.route_change_count);
 
+    /* [DYNAMIC PARENT SWITCHING] 
+     * Thay đổi Parent dựa trên số lần Retry để tránh bị kẹt tại một Relay chết.
+     */
+    uint16_t target_parent = BT_MESH_ADDR_UNASSIGNED;
+    int parent_idx = 0;
+
+    // Retry 0-2: Dùng Best Parent (Index 0)
+    // Retry 3-5: Dùng 2nd Best Parent (Index 1) nếu có
+    // Retry 6+:  Quét tìm bất kỳ Parent nào khả thi
+    if (srv->report_retry_count >= 6) {
+        // Fallback mode: Tìm bất kỳ ai là Parent
+        for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+            if (srv->forwarding_table[i].gradient < srv->gradient &&
+                srv->forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
+                target_parent = srv->forwarding_table[i].addr;
+                parent_idx = i;
+                // Ưu tiên đổi khác cái cũ một chút bằng cách lấy modulo
+                if (i >= (srv->report_retry_count % 3)) break; 
+            }
+        }
+    } else if (srv->report_retry_count >= 3) {
+        // Try 2nd best parent
+        if (srv->forwarding_table[1].gradient < srv->gradient && 
+            srv->forwarding_table[1].addr != BT_MESH_ADDR_UNASSIGNED) {
+            target_parent = srv->forwarding_table[1].addr;
+            parent_idx = 1;
+        }
+    }
+
+    // Nếu không tìm được candidate nào khác, quay về Best Parent
+    if (target_parent == BT_MESH_ADDR_UNASSIGNED) {
+        target_parent = srv->forwarding_table[0].addr;
+        parent_idx = 0;
+    }
+
     struct bt_mesh_msg_ctx ctx = {
         .app_idx = srv->model->keys[0],
-        .addr = srv->forwarding_table[0].addr, // Default Parent, usually 0 if properly maintained
+        .addr = target_parent,
         .send_ttl = BT_MESH_TTL_DEFAULT,
+        .send_rel = true, // BẮT BUỘC có ACK
     };
     
-    /* Need to find best parent to send to? Using 1st entry or specific logic? 
-       For now assume idx 0 is best parent or use routing policy.
-       Better: Use neighbor_table_get_best_parent() if available, but for simplicity use forwarding_table[0].
-    */
-    
-    // Schedule next retry with LARGE jitter to strictly avoid collisions
-    uint32_t jitter = sys_rand32_get() % 2000;
+    if (target_parent != BT_MESH_ADDR_UNASSIGNED) {
+        LOG_WRN("Resending REPORT_RSP (Retry %u) to Parent [%d]: 0x%04x", 
+                srv->report_retry_count, parent_idx, target_parent);
+        bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+    } else {
+        LOG_ERR("Retry %u: No parent to send report!", srv->report_retry_count);
+    }
+
+    // Schedule next retry with Jitter
+    uint32_t jitter = sys_rand32_get() % 1000;
     k_work_schedule(&srv->report_retry_work, K_MSEC(REPORT_RETRY_TIMEOUT_MS + jitter));
-    
-    bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
 }
 
 static int handle_report_ack(const struct bt_mesh_model *model,

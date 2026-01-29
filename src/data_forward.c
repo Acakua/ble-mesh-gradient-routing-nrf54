@@ -108,10 +108,6 @@ static void data_send_end_cb(int err, void *user_data)
            Retrying blindly causes loops. We just fail. 
            Reliability is handled by upper layers or next periodic send. */
     } else {
-        /* [FIX] Không đếm Heartbeat vào thống kê DATA */
-        if (data_send_ctx.data != 0xFFFF) {
-            pkt_stats_inc_data_tx();
-        }
         LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
     }
     
@@ -139,7 +135,7 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
         .addr = addr,
         .app_idx = gradient_srv->model->keys[0],
         .send_ttl = 0,
-        .send_rel = true,
+        .send_rel = false, /* [OPTIMIZATION] Tắt Mesh ACK để chạy nhanh 1s/gói */
     };
 
     /* [MODIFIED] Tăng kích thước buffer từ 5 lên 9 bytes (thêm 4 byte timestamp) */

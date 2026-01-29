@@ -34,7 +34,7 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
 #define TEST_DURATION_MS        (TEST_DURATION_MINUTES * 60 * 1000) 
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 2000  // Tăng lên 2 giây để giảm nghẽn mạng
+#define SENSOR_SEND_INTERVAL_MS 1000  // Tăng lên 2 giây để giảm nghẽn mạng
 
 /* ==========================================
  * GLOBALS & WORK ITEMS
@@ -341,11 +341,14 @@ static void send_data_handler(struct k_work *work)
         /* [RELATIVE TIMESTAMP] Gửi thời gian tương đối tính từ lúc bắt đầu test */
         uint32_t timestamp = k_uptime_get_32() - (g_test_start_time > 0 ? g_test_start_time : k_uptime_get_32());
 
+        /* [FIX PDR > 100%] Đếm Tx ngay khi phát sinh gói tin 
+         * thay vì đợi Callback gửi xong (tránh việc báo cáo xong mới cộng Tx).
+         */
+        pkt_stats_inc_data_tx(); 
+        
         int err = bt_mesh_gradient_srv_data_send(&gradient_srv, dest_addr, g_total_tx_count, timestamp);
         if (err) {
             LOG_WRN("Send failed (err %d)", err);
-            // Có thể xem xét giảm count nếu muốn đếm chính xác số gửi thành công vào Stack
-            // g_total_tx_count--; 
         } else {
             led_indicate_data_forwarded();
         }
@@ -357,7 +360,7 @@ static void send_data_handler(struct k_work *work)
     if (is_sending_active) {
         /* Thêm Jitter nhỏ vào mỗi gói tin để tránh hiện tượng rượt đuổi (Sync collision) */
         uint32_t next_jitter = sys_rand32_get() % 200;
-        k_work_reschedule(&send_data_work, K_MSEC(2000 + next_jitter));
+       k_work_reschedule(&send_data_work, K_MSEC(SENSOR_SEND_INTERVAL_MS + next_jitter));
     }
 }
 
