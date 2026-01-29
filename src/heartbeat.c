@@ -12,6 +12,7 @@
 #include "heartbeat.h"
 #include "gradient_srv.h"
 #include "data_forward.h"
+#include "packet_stats.h"
 
 LOG_MODULE_REGISTER(heartbeat, LOG_LEVEL_DBG);
 
@@ -120,10 +121,13 @@ static void heartbeat_work_handler(struct k_work *work)
      */
     uint16_t dummy_addr = 0; 
     int err = data_forward_send_direct(heartbeat_srv, dummy_addr, 
-                                     BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER);
+                                     BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER, 0);
     
     if (err == 0) {
-        /* SUCCESS: Transition towards Maintenance State */
+        /* SUCCESS: Increment heartbeat counter */
+        pkt_stats_inc_heartbeat();
+        
+        /* Transition towards Maintenance State */
         switch (current_hb_state) {
             case HB_STATE_FAST:
                 LOG_DBG("[Heartbeat] FAST -> MEDIUM");

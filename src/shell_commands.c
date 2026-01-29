@@ -50,6 +50,7 @@
 #include "reverse_routing.h"
 #include "heartbeat.h"
 #include "data_forward.h"
+#include "packet_stats.h"
 
 LOG_MODULE_REGISTER(shell_cmd, LOG_LEVEL_INF);
 
@@ -462,7 +463,7 @@ static int cmd_mesh_data(const struct shell *sh, size_t argc, char **argv)
                 payload, nexthop);
 
     /* Gửi DATA */
-    int err = bt_mesh_gradient_srv_data_send(&gradient_srv, nexthop, (uint16_t)payload);
+    int err = bt_mesh_gradient_srv_data_send(&gradient_srv, nexthop, (uint16_t)payload, 0);
 
     if (err == 0) {
         shell_print(sh, "DATA da gui thanh cong!");
@@ -512,6 +513,105 @@ static int cmd_mesh_heartbeat(const struct shell *sh, size_t argc, char **argv)
 }
 
 /*============================================================================*/
+/*                         Command: mesh report stop                          */
+/*============================================================================*/
+
+/**
+ * @brief Gửi lệnh REPORT REQ để dừng test và thu thập số liệu
+ * Lệnh: mesh report stop
+ */
+static int cmd_mesh_report_stop(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_print(sh, "Su dung: mesh report stop");
+        return -EINVAL;
+    }
+
+    if (strcmp(argv[1], "stop") == 0) {
+        shell_print(sh, "Dang gui lenh REPORT REQUEST (STOP)...");
+        bt_mesh_gradient_srv_send_report_req(&gradient_srv);
+    } else if (strcmp(argv[1], "start") == 0) {
+        shell_print(sh, "Dang gui lenh TEST START...");
+        bt_mesh_gradient_srv_send_test_start(&gradient_srv);
+    } else {
+        shell_print(sh, "Lenh khong hop le. Su dung: start | stop");
+    }
+
+    return 0;
+}
+
+/*============================================================================*/
+/*                         Command: mesh stats                                */
+/*============================================================================*/
+
+/**
+ * @brief Hiển thị thống kê gói tin TX
+ *
+ * Lệnh: mesh stats
+ *
+ * Hiển thị:
+ *   - Gradient Beacon TX count
+ *   - Heartbeat TX count
+ *   - DATA TX count
+ *   - Control Overhead percentage
+ */
+static int cmd_mesh_stats_show(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    struct packet_stats stats;
+    pkt_stats_get(&stats);
+
+    uint32_t control_total = stats.gradient_beacon_tx + stats.heartbeat_tx;
+    uint32_t all_total = control_total + stats.data_tx;
+
+    shell_print(sh, "");
+    shell_print(sh, "=== Thong Ke Goi Tin TX ===");
+    shell_print(sh, "Gradient Beacon : %u", stats.gradient_beacon_tx);
+    shell_print(sh, "Heartbeat       : %u", stats.heartbeat_tx);
+    shell_print(sh, "DATA            : %u", stats.data_tx);
+    shell_print(sh, "---------------------------");
+    shell_print(sh, "CONTROL Total   : %u", control_total);
+    shell_print(sh, "Total TX        : %u", all_total);
+
+    if (all_total > 0) {
+        uint32_t overhead_percent = (control_total * 100) / all_total;
+        shell_print(sh, "Control Overhead: %u%%", overhead_percent);
+    } else {
+        shell_print(sh, "Control Overhead: N/A (chua co goi tin)");
+    }
+
+    shell_print(sh, "===========================");
+
+    return 0;
+}
+
+/**
+ * @brief Reset tất cả counters về 0
+ *
+ * Lệnh: mesh stats reset
+ */
+static int cmd_mesh_stats_reset(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    pkt_stats_reset();
+    shell_print(sh, "Da reset tat ca counters ve 0.");
+
+    return 0;
+}
+
+/* Subcommands for stats */
+SHELL_STATIC_SUBCMD_SET_CREATE(stats_subcmds,
+    SHELL_CMD_ARG(reset, NULL,
+        "Reset tat ca counters ve 0",
+        cmd_mesh_stats_reset, 1, 0),
+    SHELL_SUBCMD_SET_END
+);
+
+/*============================================================================*/
 /*                         Shell Command Registration                         */
 /*============================================================================*/
 
@@ -542,6 +642,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(mesh_cmds,
         "  Vi du: mesh backprop 0x0003 123",
         cmd_mesh_backprop, 3, 0),
 
+    SHELL_CMD_ARG(report, NULL,
+        "Dieu khien bao cao: mesh report stop\n"
+        "  stop: Dung test va yeu cau bao cao tu tat ca node",
+        cmd_mesh_report_stop, 2, 0),
+
     SHELL_CMD_ARG(data, NULL,
         "Gui DATA len Gateway: mesh data <payload>\n"
         "  Vi du: mesh data 456",
@@ -550,6 +655,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(mesh_cmds,
     SHELL_CMD_ARG(heartbeat, NULL,
         "Hien thi trang thai heartbeat",
         cmd_mesh_heartbeat, 1, 0),
+
+    SHELL_CMD(stats, &stats_subcmds,
+        "Thong ke goi tin TX (mesh stats | mesh stats reset)",
+        cmd_mesh_stats_show),
 
     SHELL_SUBCMD_SET_END
 );
@@ -565,5 +674,6 @@ SHELL_CMD_REGISTER(mesh, &mesh_cmds,
     "  mesh dest      - Danh sach destination\n"
     "  mesh backprop  - Gui BACKPROP (Gateway)\n"
     "  mesh data      - Gui DATA (Node)\n"
-    "  mesh heartbeat - Trang thai heartbeat",
+    "  mesh heartbeat - Trang thai heartbeat\n"
+    "  mesh stats     - Thong ke goi tin TX",
     NULL);

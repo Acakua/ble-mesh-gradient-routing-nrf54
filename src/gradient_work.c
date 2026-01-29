@@ -9,6 +9,7 @@
 #include "routing_policy.h"
 #include "heartbeat.h"
 #include "reverse_routing.h"
+#include "packet_stats.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -39,6 +40,7 @@ LOG_MODULE_REGISTER(gradient_work, LOG_LEVEL_DBG);
 
 /* Global gradient server reference */
 static struct bt_mesh_gradient_srv *g_gradient_srv = NULL;
+static uint16_t last_best_parent_addr = BT_MESH_ADDR_UNASSIGNED;
 
 /* Work items */
 static struct k_work_delayable publish_work;
@@ -82,6 +84,7 @@ static void publish_handler(struct k_work *work)
             if (err) {
                 LOG_WRN("Gradient publish failed: %d", err);
             } else {
+                pkt_stats_inc_gradient_beacon();
                 LOG_DBG("Gradient published: %d", g_gradient_srv->gradient);
             }
         }
@@ -209,6 +212,25 @@ static void cleanup_handler(struct k_work *work)
         }
 #endif
     }
+    
+    /* [NEW] Detect Parent Change even if Gradient is same */
+    const neighbor_entry_t *current_best = nt_best(
+        (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
+    
+    uint16_t current_best_addr = (current_best != NULL) ? current_best->addr : BT_MESH_ADDR_UNASSIGNED;
+    
+    if (current_best_addr != last_best_parent_addr) {
+        LOG_INF("[Cleanup] BEST PARENT changed: 0x%04x -> 0x%04x. Resetting Heartbeat.", 
+                last_best_parent_addr, current_best_addr);
+        
+        last_best_parent_addr = current_best_addr;
+        
+        if (g_gradient_srv->gradient != UINT8_MAX) {
+            pkt_stats_inc_route_change();
+            heartbeat_trigger_reset();
+        }
+    }
 
     k_mutex_unlock(&g_gradient_srv->forwarding_table_mutex);
 
@@ -271,6 +293,25 @@ static void gradient_process_handler(struct k_work *work)
             bt_mesh_gradient_srv_gradient_send(gradient_srv);
         }
 #endif
+    }
+
+    /* [NEW] Detect Parent Change even if Gradient is same */
+    const neighbor_entry_t *current_best = nt_best(
+        (const neighbor_entry_t *)gradient_srv->forwarding_table,
+        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE);
+    
+    uint16_t current_best_addr = (current_best != NULL) ? current_best->addr : BT_MESH_ADDR_UNASSIGNED;
+    
+    if (current_best_addr != last_best_parent_addr) {
+        LOG_INF("[Process] BEST PARENT changed: 0x%04x -> 0x%04x. Resetting Heartbeat.", 
+                last_best_parent_addr, current_best_addr);
+        
+        last_best_parent_addr = current_best_addr;
+        
+        if (gradient_srv->gradient != UINT8_MAX) {
+            pkt_stats_inc_route_change();
+            heartbeat_trigger_reset();
+        }
     }
     
     gradient_ctx.gradient_srv = NULL;

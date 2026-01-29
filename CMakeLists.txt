@@ -15,6 +15,7 @@ target_sources(app PRIVATE
 	src/gradient_work.c
 	src/reverse_routing.c
 	src/heartbeat.c
-	src/shell_commands.c)
+	src/shell_commands.c
+	src/packet_stats.c)
 target_include_directories(app PRIVATE include)
 # NORDIC SDK APP END

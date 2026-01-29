@@ -39,6 +39,10 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_TEST_START BT_MESH_MODEL_OP_3(0x0F, \
                         BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
+/* [NEW] Report ACK opcode (Unicast from Sink to Node - Reliability) */
+#define BT_MESH_GRADIENT_SRV_OP_REPORT_ACK BT_MESH_MODEL_OP_3(0x10, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
 /* .. include_endpoint_gradient_srv_rst_1 */
 
 /** Default TTL for BACKPROP packets */
@@ -51,9 +55,10 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER      0xFFFF
 
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE 1
-#define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE (\
-                      CONFIG_BT_MESH_GRADIENT_SRV_MESSAGE_LENGTH \
-                      + 1) /* + \0 */
+#define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE 20 /* Ensure enough for DATA+TS (9 bytes) */
+
+#define REPORT_RETRY_TIMEOUT_MS 3000 // Tăng thời gian chờ cơ bản
+#define REPORT_MAX_RETRIES      10   // Tăng số lần thử lại tối đa
 
 #ifndef CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS
 #define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS 30000  // 30 giây
@@ -143,6 +148,11 @@ struct bt_mesh_gradient_srv {
     bt_mesh_gradient_srv_forwarding_ctx
         forwarding_table[
             CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE];
+
+    /* Reliable Reporting Context */
+    struct k_work_delayable report_retry_work;
+    uint8_t report_retry_count;
+    bool is_report_pending;
 };
 /* .. include_endpoint_gradient_srv_rst_3 */
 
@@ -171,7 +181,8 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
  */
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t addr,
-                      uint16_t data);
+                      uint16_t data,
+                      uint32_t timestamp);
 
 /** @brief Send BACKPROP_DATA to a specific destination.
  *
@@ -220,8 +231,7 @@ int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *gradient_s
  * @param total_tx Total packets sent during the test.
  * @retval 0 Successfully sent.
  */
-int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_srv, 
-                                         uint16_t total_tx);
+int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_srv);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

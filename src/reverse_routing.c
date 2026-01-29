@@ -88,7 +88,7 @@ static bool remove_dest_from_list(backprop_node_t **head, uint16_t dest_addr)
             }
             
             /* CHANGED: Use slab free instead of k_free */
-            k_mem_slab_free(&rrt_mem_slab, (void **)&current);
+            k_mem_slab_free(&rrt_mem_slab, current);
             return true;
         }
         prev = current;
@@ -145,7 +145,7 @@ static void remove_oldest_from_list(backprop_node_t **head)
     LOG_DBG("[RRT] Removed oldest dest 0x%04x to make room", oldest->addr);
     
     /* CHANGED: Use slab free instead of k_free */
-    k_mem_slab_free(&rrt_mem_slab, (void **)&oldest);
+    k_mem_slab_free(&rrt_mem_slab, oldest);
 }
 
 /*******************************************************************************
@@ -307,7 +307,7 @@ int rrt_cleanup_expired(void *table, size_t table_size,
                 *pp = current->next;
                 
                 /* CHANGED: Use slab free instead of k_free */
-                k_mem_slab_free(&rrt_mem_slab, (void **)&current);
+                k_mem_slab_free(&rrt_mem_slab, current);
                 
                 removed_count++;
             } else {
@@ -375,7 +375,7 @@ void rrt_clear_entry(void *table, size_t table_size, size_t index)
         backprop_node_t *next = current->next;
         
         /* CHANGED: Use slab free instead of k_free */
-        k_mem_slab_free(&rrt_mem_slab, (void **)&current);
+        k_mem_slab_free(&rrt_mem_slab, current);
         
         current = next;
     }
