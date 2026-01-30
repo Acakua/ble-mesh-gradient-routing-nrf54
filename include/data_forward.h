@@ -52,9 +52,10 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
 int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
                              uint16_t addr, uint16_t data, uint32_t timestamp);
 
-#ifdef __cplusplus
 const neighbor_entry_t *find_strict_upstream_parent(
     struct bt_mesh_gradient_srv *srv, uint16_t exclude_addr);
+
+#ifdef __cplusplus
 }
 #endif
 

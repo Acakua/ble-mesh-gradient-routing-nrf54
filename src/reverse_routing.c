@@ -16,14 +16,11 @@ LOG_MODULE_REGISTER(reverse_routing, LOG_LEVEL_INF);
  * * Calculating total required nodes based on Kconfig limits.
  * This prevents heap fragmentation on nRF54L15.
  */
-#if defined(CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE) && \
-    defined(CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST)
-    #define RRT_TOTAL_NODES (CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE * \
-                             CONFIG_BT_MESH_GRADIENT_SRV_RRT_MAX_DEST)
-#else
-    /* Fallback safe defaults if Kconfig is missing */
-    #define RRT_TOTAL_NODES (25 * 50) 
-#endif
+    /* Tối ưu RAM: 
+     * Thay vì lấy TableSize * MaxDest (quá lớn), ta chỉ cần cấp phát đủ cho 
+     * tổng số node thực tế trong mạng (ví dụ 100 node).
+     */
+    #define RRT_TOTAL_NODES 100
 
 /* Fallback definition if header doesn't define it */
 #ifndef RRT_MAX_DEST_PER_NEXTHOP

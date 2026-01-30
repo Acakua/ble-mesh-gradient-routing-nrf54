@@ -1,2 +1,0 @@
-﻿Timestamp,Type,SourceAddr,SenderAddr,Seq_or_TxCount,RSSI,HopCount,Latency_ms,BeaconTx,HeartbeatTx,RouteChanges,Rx_Unique_Count,PDR_Percent
-17:21:32.963,EVENT,TEST_START,Duration_ms=60000,,,,,,,,,

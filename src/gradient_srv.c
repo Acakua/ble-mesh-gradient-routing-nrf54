@@ -403,8 +403,12 @@ static void report_retry_handler(struct k_work *work)
     struct packet_stats stats;
     pkt_stats_get(&stats);
 
-    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 8);
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 10);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP);
+    
+    /* Gắn thêm địa chỉ nguồn gốc (Reporter) vào payload để Relay/Sink nhận diện đúng */
+    uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+    net_buf_simple_add_le16(&msg, my_addr);
     
     net_buf_simple_add_le16(&msg, (uint16_t)stats.data_tx);
     net_buf_simple_add_le16(&msg, (uint16_t)stats.gradient_beacon_tx);
@@ -510,40 +514,77 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
                              struct bt_mesh_msg_ctx *ctx,
                              struct net_buf_simple *buf)
 {
-    if (buf->len < 8) return -EINVAL;
+    /* Kiểm tra chiều dài payload (10 bytes: ReporterAddr(2) + 4 stats * 2) */
+    if (buf->len < 10) return -EINVAL;
 
+    uint16_t reporter_addr = net_buf_simple_pull_le16(buf);
     uint16_t data_tx = net_buf_simple_pull_le16(buf);
     uint16_t beacon_tx = net_buf_simple_pull_le16(buf);
     uint16_t hb_tx = net_buf_simple_pull_le16(buf);
     uint16_t route_changes = net_buf_simple_pull_le16(buf);
     
-    /* LOG CHO PYTHON SCRIPT */
-    // Format: CSV_LOG,REPORT,NodeAddr,DataTx,BeaconTx,HbTx,RouteChanges
-    printk("CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u\n", 
-           ctx->addr, data_tx, beacon_tx, hb_tx, route_changes);
-           
-    /* SEND ACK via Reverse Routing */
     struct bt_mesh_gradient_srv *srv = model->rt->user_data; 
-    uint16_t nexthop = rrt_find_nexthop(srv->forwarding_table, 
-                                        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                                        ctx->addr);
-                                        
-    if (nexthop != BT_MESH_ADDR_UNASSIGNED) {
-        BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_ACK, 2);
-        bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_REPORT_ACK);
-        net_buf_simple_add_le16(&msg, ctx->addr); // Payload: Target (Sender of Report)
+    
+    /* [LOGIC PHÂN NHÁNH: SINK vs RELAY] */
+    if (srv->gradient == 0) {
+        /* [1. I AM SINK] - Log dữ liệu và gửi ACK về nguồn gốc thực sự */
+        LOG_INF("SINK received REPORT from 0x%04x (Forwarded by 0x%04x)", 
+                reporter_addr, ctx->addr);
+        
+        // Format log cho Python script (Dùng reporter_addr để định danh đúng node)
+        printk("CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u\n", 
+               reporter_addr, data_tx, beacon_tx, hb_tx, route_changes);
+               
+        /* SEND ACK via Reverse Routing tới Reporter gốc */
+        uint16_t nexthop = rrt_find_nexthop(srv->forwarding_table, 
+                                            CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                                            reporter_addr);
+                                            
+        if (nexthop != BT_MESH_ADDR_UNASSIGNED) {
+            BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_ACK, 2);
+            bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_REPORT_ACK);
+            net_buf_simple_add_le16(&msg, reporter_addr);
 
-        struct bt_mesh_msg_ctx new_ctx = {
-            .app_idx = model->keys[0],
-            .addr = nexthop,
-            .send_ttl = BT_MESH_TTL_DEFAULT,
-        };
-        bt_mesh_model_send(model, &new_ctx, &msg, NULL, NULL);
-        LOG_DBG("Sent REPORT_ACK to 0x%04x via 0x%04x", ctx->addr, nexthop);
+            struct bt_mesh_msg_ctx ack_ctx = {
+                .app_idx = model->keys[0],
+                .addr = nexthop,
+                .send_ttl = BT_MESH_TTL_DEFAULT,
+            };
+            bt_mesh_model_send(model, &ack_ctx, &msg, NULL, NULL);
+            LOG_DBG("Sink sent REPORT_ACK for 0x%04x via Nexthop 0x%04x", reporter_addr, nexthop);
+        } else {
+            LOG_WRN("Sink cannot find RRT route for ACK to 0x%04x (Source: 0x%04x)", 
+                    reporter_addr, ctx->addr);
+        }
     } else {
-        LOG_WRN("Sink cannot find route for ACK to 0x%04x", ctx->addr);
+        /* [2. I AM RELAY] - Chuyển tiếp bản báo cáo lên CHA */
+        const neighbor_entry_t *best_parent = find_strict_upstream_parent(srv, reporter_addr);
+
+        if (best_parent != NULL) {
+            LOG_INF("Relaying REPORT from 0x%04x to Parent 0x%04x", reporter_addr, best_parent->addr);
+
+            BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 10);
+            bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP);
+            net_buf_simple_add_le16(&msg, reporter_addr); // RE-PACK ORIGINAL REPORTER
+            net_buf_simple_add_le16(&msg, data_tx);
+            net_buf_simple_add_le16(&msg, beacon_tx);
+            net_buf_simple_add_le16(&msg, hb_tx);
+            net_buf_simple_add_le16(&msg, route_changes);
+
+            struct bt_mesh_msg_ctx fwd_ctx = {
+                .app_idx = model->keys[0],
+                .addr = best_parent->addr,
+                .send_ttl = BT_MESH_TTL_DEFAULT,
+                .send_rel = true, 
+            };
+            
+            bt_mesh_model_send(model, &fwd_ctx, &msg, NULL, NULL);
+        } else {
+            LOG_ERR("Relay 0x%04x has no PARENT to forward report from 0x%04x!", 
+                    bt_mesh_model_elem(model)->rt->addr, reporter_addr);
+        }
     }
-           
+            
     return 0;
 }
 
@@ -575,7 +616,7 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     },
     { 
         BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 
-        BT_MESH_LEN_EXACT(8), 
+        BT_MESH_LEN_EXACT(10), 
         handle_report_rsp 
     },
     { 
@@ -782,9 +823,11 @@ int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_s
     gradient_srv->is_report_pending = true;
     gradient_srv->report_retry_count = 0;
     
-    /* Trigger first attempt immediately via Work Queue */
-    /* This reuses the logic in report_retry_handler */
-    k_work_schedule(&gradient_srv->report_retry_work, K_NO_WAIT);
+    /* [FIX CONGESTION] Thêm Delay ngẫu nhiên ban đầu (0-5s) cho cấu hình 40 node 
+     * để tránh việc hàng chục node cùng ập vào Sink một lúc gây nghẽn.
+     */
+    uint32_t initial_jitter = sys_rand32_get() % 5000;
+    k_work_schedule(&gradient_srv->report_retry_work, K_MSEC(initial_jitter));
     
     return 0;
 }

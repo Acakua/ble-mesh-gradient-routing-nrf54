@@ -1,0 +1,4 @@
+-Sửa nút stop
+-thêm đo số bản tin tải (tổng số bản tin, trong hàm if khi chuyển tiếp gói tin tạo thêm hàm và +1)
+-đo giá trị rssi thấp nhất trền đường truyền
+- vẽ đồ thị trục hoành là chu kì phát từng data, trục tung là PDR toàn cục (sửa format gói tin để thêm số gói tin đã gửi tại thời điểm đó)
