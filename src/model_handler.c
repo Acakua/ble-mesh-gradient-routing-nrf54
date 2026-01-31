@@ -16,6 +16,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h> 
+#include <zephyr/sys/reboot.h>
 
 #include "gradient_srv.h"
 #include "model_handler.h"
@@ -260,13 +261,13 @@ void sink_start_test(void)
     
     /* 1. Broadcast lệnh START (Gửi 3 lần với CÙNG ID để đảm bảo độ tin cậy) */
     pkt_stats_reset();
-    
+    g_test_start_time = k_uptime_get_32();
     // Phát lần đầu với force_new_id = true để tăng ID máy phát
     bt_mesh_gradient_srv_send_test_start(&gradient_srv, true);
     
     // Hai lần sau phát lại với cùng ID đó (force_new_id = false)
     for (int i = 0; i < 2; i++) {
-        k_sleep(K_MSEC(100));
+        k_sleep(K_MSEC(20));
         bt_mesh_gradient_srv_send_test_start(&gradient_srv, false);
     }
     
@@ -279,9 +280,6 @@ void sink_start_test(void)
     
     /* Nháy đèn báo hiệu */
     led_indicate_attention(true);
-    k_sleep(K_MSEC(1000));
-    led_indicate_attention(false);
-    g_test_start_time = k_uptime_get_32();
 }
 
 void sink_stop_test(void)
@@ -463,5 +461,17 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
         else {
             sink_stop_test();
         }
+    }
+    if (has_changed & button_state & DK_BTN4_MSK)
+    {
+        LOG_WRN("\n>>> BUTTON 4 PRESSED: REBOOTING SYSTEM... <<<");
+        
+        /* [QUAN TRỌNG] Ngủ ngắn 200ms để hệ thống kịp in dòng Log trên ra UART 
+         * trước khi bị cắt điện khởi động lại.
+         */
+        k_sleep(K_MSEC(200)); 
+        
+        /* Thực hiện Cold Reboot (Tương đương bấm nút Reset cứng) */
+        sys_reboot(SYS_REBOOT_COLD);
     }
 }

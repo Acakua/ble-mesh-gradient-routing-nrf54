@@ -344,6 +344,20 @@ static int handle_test_start(const struct bt_mesh_model *model,
                              struct net_buf_simple *buf)
 {
     struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+    
+    /* ----------------------------------------------------------------------
+     * [FIX QUAN TRỌNG] CHẶN LOOPBACK (TIẾNG VỌNG)
+     * ----------------------------------------------------------------------
+     * Kiểm tra xem địa chỉ người gửi (SRC) có trùng với địa chỉ của chính tôi không.
+     * Nếu trùng: Nghĩa là gói tin này do TÔI phát ra, được mạng relay ngược lại.
+     * HÀNH ĐỘNG: Bỏ qua ngay lập tức để không Reset lại timer.
+     */
+    uint16_t my_addr = bt_mesh_model_elem(model)->rt->addr;
+    if (ctx->addr == my_addr) {
+        LOG_WRN("Ignored Loopback TEST_START from self (0x%04x)", ctx->addr);
+        return 0;
+    }
+    /* ---------------------------------------------------------------------- */
 
     /* 1. Kiểm tra độ dài và lấy Test ID */
     if (buf->len < 1) {
@@ -351,7 +365,7 @@ static int handle_test_start(const struct bt_mesh_model *model,
     }
     uint8_t received_test_id = net_buf_simple_pull_u8(buf);
     
-    /* 2. Duplicate Check (Chống lặp) */
+    /* 2. Duplicate Check (Chống xử lý lặp lại ID cũ từ node khác) */
     if (received_test_id == last_processed_test_id) {
         /* Đã xử lý lệnh này rồi, bỏ qua */
         return 0;
@@ -368,7 +382,9 @@ static int handle_test_start(const struct bt_mesh_model *model,
     }
 
     /* 5. Re-broadcast (Controlled Flooding) */
-    /* Điều kiện: TTL còn đủ và tôi không phải là Sink */
+    /* Điều kiện: TTL còn đủ và tôi không phải là Sink 
+     * (Sink đã phát rồi, không cần re-broadcast lại cái mình vừa nhận) 
+     */
     if (srv->gradient != 0 && ctx->recv_ttl > 1) {
         
         LOG_DBG("Re-broadcasting TEST START ID %d...", received_test_id);
