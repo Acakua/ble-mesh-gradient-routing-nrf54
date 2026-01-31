@@ -51,6 +51,7 @@
 #include "heartbeat.h"
 #include "data_forward.h"
 #include "packet_stats.h"
+#include "model_handler.h"
 
 LOG_MODULE_REGISTER(shell_cmd, LOG_LEVEL_INF);
 
@@ -463,7 +464,7 @@ static int cmd_mesh_data(const struct shell *sh, size_t argc, char **argv)
                 payload, nexthop);
 
     /* Gửi DATA */
-    int err = bt_mesh_gradient_srv_data_send(&gradient_srv, nexthop, (uint16_t)payload, 0);
+    int err = bt_mesh_gradient_srv_data_send(&gradient_srv, nexthop, (uint16_t)payload, 0, 0);
 
     if (err == 0) {
         shell_print(sh, "DATA da gui thanh cong!");
@@ -517,22 +518,22 @@ static int cmd_mesh_heartbeat(const struct shell *sh, size_t argc, char **argv)
 /*============================================================================*/
 
 /**
- * @brief Gửi lệnh REPORT REQ để dừng test và thu thập số liệu
- * Lệnh: mesh report stop
+ * @brief Điều khiển bài test (Start/Stop)
+ * Lệnh: mesh report stop | start
  */
 static int cmd_mesh_report_stop(const struct shell *sh, size_t argc, char **argv)
 {
     if (argc < 2) {
-        shell_print(sh, "Su dung: mesh report stop");
+        shell_print(sh, "Su dung: mesh report start | stop");
         return -EINVAL;
     }
 
     if (strcmp(argv[1], "stop") == 0) {
-        shell_print(sh, "Dang gui lenh REPORT REQUEST (STOP)...");
-        bt_mesh_gradient_srv_send_report_req(&gradient_srv);
+        shell_print(sh, "Dang dung test qua Sink Control...");
+        sink_stop_test();
     } else if (strcmp(argv[1], "start") == 0) {
-        shell_print(sh, "Dang gui lenh TEST START...");
-        bt_mesh_gradient_srv_send_test_start(&gradient_srv);
+        shell_print(sh, "Dang bat dau test qua Sink Control...");
+        sink_start_test();
     } else {
         shell_print(sh, "Lenh khong hop le. Su dung: start | stop");
     }

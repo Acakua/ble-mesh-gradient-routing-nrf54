@@ -108,6 +108,9 @@ static void handle_data_received(struct bt_mesh_gradient_srv *srv, uint16_t data
 /* [SENSOR] Xử lý khi nhận lệnh TEST START từ Sink */
 static void handle_test_start_received(struct bt_mesh_gradient_srv *srv)
 {
+    /* Node Sink không xử lý lệnh của chính mình */
+    if (srv->gradient == 0) return;
+
     LOG_INF(">> EVENT: START COMMAND RECEIVED FROM SINK <<");
     
     /* 0. Bật thống kê gói tin */
@@ -139,6 +142,9 @@ static void handle_test_start_received(struct bt_mesh_gradient_srv *srv)
 /* [SENSOR] Xử lý khi nhận REPORT REQ (STOP) từ Sink */
 static void handle_report_req_received(struct bt_mesh_gradient_srv *srv)
 {
+    /* Node Sink không xử lý lệnh của chính mình */
+    if (srv->gradient == 0) return;
+
     LOG_WRN(">> EVENT: STOP REQUEST RECEIVED FROM SINK <<");
     
     /* 0. Ngừng thống kê gói tin */
@@ -243,7 +249,7 @@ const struct bt_mesh_comp *model_handler_init(void)
 /* -------------------------------------------------------------------------
  * HELPER FUNCTIONS (SINK CONTROL)
  * ------------------------------------------------------------------------- */
-static void sink_start_test(void)
+void sink_start_test(void)
 {
     if (is_test_running) return;
 
@@ -252,13 +258,16 @@ static void sink_start_test(void)
     /* 0. Bật thống kê gói tin */
     pkt_stats_set_enabled(true);
     
-    /* 1. Broadcast lệnh START (Gửi 3 lần để đảm bảo độ tin cậy) */
+    /* 1. Broadcast lệnh START (Gửi 3 lần với CÙNG ID để đảm bảo độ tin cậy) */
     pkt_stats_reset();
-    g_test_start_time = k_uptime_get_32();
     
-    for (int i = 0; i < 3; i++) {
-        bt_mesh_gradient_srv_send_test_start(&gradient_srv);
-        k_sleep(K_MSEC(100)); // Chờ một chút giữa các lần phát
+    // Phát lần đầu với force_new_id = true để tăng ID máy phát
+    bt_mesh_gradient_srv_send_test_start(&gradient_srv, true);
+    
+    // Hai lần sau phát lại với cùng ID đó (force_new_id = false)
+    for (int i = 0; i < 2; i++) {
+        k_sleep(K_MSEC(100));
+        bt_mesh_gradient_srv_send_test_start(&gradient_srv, false);
     }
     
     /* 2. Cài đặt Timer tự động dừng */
@@ -272,9 +281,10 @@ static void sink_start_test(void)
     led_indicate_attention(true);
     k_sleep(K_MSEC(1000));
     led_indicate_attention(false);
+    g_test_start_time = k_uptime_get_32();
 }
 
-static void sink_stop_test(void)
+void sink_stop_test(void)
 {
     if (!is_test_running) return;
 
@@ -283,8 +293,15 @@ static void sink_stop_test(void)
     /* 0. Ngừng thống kê gói tin */
     pkt_stats_set_enabled(false);
 
-    /* 1. Broadcast lệnh STOP & REPORT */
-    bt_mesh_gradient_srv_send_report_req(&gradient_srv);
+    /* 1. Broadcast lệnh STOP & REPORT (Gửi 3 lần với CÙNG ID để đảm bảo độ tin cậy) */
+    // Phát lần đầu với force_new_id = true để tăng ID máy phát
+    bt_mesh_gradient_srv_send_report_req(&gradient_srv, true);
+    
+    // Hai lần sau phát lại với cùng ID đó (force_new_id = false)
+    for (int i = 0; i < 2; i++) {
+        k_sleep(K_MSEC(100));
+        bt_mesh_gradient_srv_send_report_req(&gradient_srv, false);
+    }
     
     /* 2. Hủy timer (đề phòng trường hợp gọi thủ công trước khi hết giờ) */
     k_work_cancel_delayable(&auto_stop_work);
@@ -346,7 +363,8 @@ static void send_data_handler(struct k_work *work)
          */
         pkt_stats_inc_data_tx(); 
         
-        int err = bt_mesh_gradient_srv_data_send(&gradient_srv, dest_addr, g_total_tx_count, timestamp);
+        /* [NEW] Khởi tạo Min RSSI = 0 (giá trị lớn nhất) cho gói tin gốc */
+        int err = bt_mesh_gradient_srv_data_send(&gradient_srv, dest_addr, g_total_tx_count, timestamp, 0);
         if (err) {
             LOG_WRN("Send failed (err %d)", err);
         } else {

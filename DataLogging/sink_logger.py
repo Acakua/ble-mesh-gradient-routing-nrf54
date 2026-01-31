@@ -51,13 +51,14 @@ def main():
                 "SourceAddr", 
                 "SenderAddr", 
                 "Seq_or_TxCount",
-                "RSSI", 
                 "HopCount", 
                 "Latency_ms",
+                "PathMinRSSI", # [NEW] Thay thế RSSI chặng cuối bằng RSSI thấp nhất đường truyền
                 "BeaconTx",
                 "HeartbeatTx",
                 "RouteChanges",
-                "Rx_Unique_Count", # Đếm số gói tin KHÔNG TRÙNG LẶP
+                "FwdCount",     # [NEW] Số bản tin node này đã chuyển tiếp giúp node khác
+                "Rx_Unique_Count", 
                 "PDR_Percent"
             ]
             writer.writerow(headers)
@@ -97,11 +98,12 @@ def main():
                             row[1] = log_type
 
                             # --- XỬ LÝ GÓI TIN DATA ---
+                            # Format: CSV_LOG,DATA,Src,Sender,Seq,Hops,DelayMs,PathMinRSSI
                             if log_type == "DATA":
-                                if len(parts) >= 6:
+                                if len(parts) >= 7:
                                     src_val = safe_int_convert(parts[1])
                                     sender_val = safe_int_convert(parts[2])
-                                    seq_val = safe_int_convert(parts[3]) # Sequence Number
+                                    seq_val = safe_int_convert(parts[3])
                                     
                                     src_hex = f"0x{src_val:04x}"
                                     sender_hex = f"0x{sender_val:04x}"
@@ -109,22 +111,23 @@ def main():
                                     row[2] = src_hex
                                     row[3] = sender_hex
                                     row[4] = str(seq_val)
-                                    row[5] = parts[4] # RSSI
-                                    row[6] = parts[5] # Hops
-                                    row[7] = parts[6] if len(parts) > 6 else "" # Delay
+                                    row[5] = parts[4] # Hops
+                                    row[6] = parts[5] # Latency
+                                    row[7] = parts[6] if len(parts) > 6 else "" # PathMinRSSI
 
                                     # [LOGIC UNIQUE]
                                     if src_hex not in rx_stats:
                                         rx_stats[src_hex] = set()
                                     
-                                    # Kiểm tra trùng lặp trước khi thêm
                                     is_dup = seq_val in rx_stats[src_hex]
                                     rx_stats[src_hex].add(seq_val)
                                     
                                     dup_msg = " [DUP]" if is_dup else ""
-                                    print(f"[{now}] DATA | {src_hex} -> {sender_hex} | Seq:{seq_val} | RSSI:{parts[4]}{dup_msg}")
+                                    min_rssi = parts[6] if len(parts) > 6 else "N/A"
+                                    print(f"[{now}] DATA | {src_hex} -> {sender_hex} | Seq:{seq_val} | MinRSSI:{min_rssi}{dup_msg}")
 
                             # --- XỬ LÝ GÓI TIN HEARTBEAT ---
+                            # Format: CSV_LOG,HEARTBEAT,Src,Sender,Hops,DelayMs
                             elif log_type == "HEARTBEAT":
                                 if len(parts) >= 5:
                                     src_val = safe_int_convert(parts[1])
@@ -134,26 +137,23 @@ def main():
                                     
                                     row[2] = src_hex
                                     row[3] = sender_hex
-                                    row[6] = parts[3]
-                                    row[5] = parts[4]
-                                    print(f"[{now}] HEARTBEAT | Src:{src_hex}")
+                                    row[5] = parts[3] # Hops
+                                    row[6] = parts[4] # Latency
+                                    print(f"[{now}] HEARTBEAT | Src:{src_hex} | Hops:{parts[3]}")
 
                             # --- XỬ LÝ GÓI TIN REPORT ---
+                            # Format: CSV_LOG,REPORT,Src,Tx,Beacon,HB,RouteChanges,FwdCount
                             elif log_type == "REPORT":
-                                if len(parts) >= 6:
+                                if len(parts) >= 7:
                                     src_val = safe_int_convert(parts[1])
                                     src_hex = f"0x{src_val:04x}"
 
-                                    # [LOGIC FILTER] Bỏ qua nếu Node này đã báo cáo rồi
                                     if src_hex in reported_nodes:
-                                        print(f"[{now}] Info: Ignored duplicate REPORT from {src_hex}")
                                         continue
                                     
                                     reported_nodes.add(src_hex)
-
                                     data_tx = safe_int_convert(parts[2])
                                     
-                                    # [LOGIC UNIQUE PDR] Lấy số lượng phần tử duy nhất trong Set
                                     if src_hex in rx_stats:
                                         measured_rx = len(rx_stats[src_hex])
                                     else:
@@ -162,17 +162,19 @@ def main():
                                     pdr = (measured_rx / data_tx * 100.0) if data_tx > 0 else 0.0
 
                                     row[2] = src_hex
-                                    row[4] = str(data_tx)
-                                    row[8] = parts[3]
-                                    row[9] = parts[4]
-                                    row[10] = parts[5]
-                                    row[11] = str(measured_rx) # Ghi số Unique Packet vào CSV
-                                    row[12] = f"{pdr:.2f}"
+                                    row[4] = str(data_tx)     # TxCount (Node)
+                                    row[8] = parts[3]         # Beacon
+                                    row[9] = parts[4]         # HB
+                                    row[10] = parts[5]        # RouteChanges
+                                    row[11] = parts[6]        # FwdCount
+                                    row[12] = str(measured_rx) # Unique Count (Gateway)
+                                    row[13] = f"{pdr:.2f}"
 
                                     print(f"\n[{now}] >>> FINAL REPORT {src_hex} <<<")
                                     print(f"    Tx (Node):   {data_tx}")
                                     print(f"    Rx (Unique): {measured_rx}")
                                     print(f"    PDR:         {pdr:.2f}%")
+                                    print(f"    Fwd Count:   {parts[6]} packets")
                                     print("---------------------------------------------")
 
                             # --- XỬ LÝ SỰ KIỆN ---

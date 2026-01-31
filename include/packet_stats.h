@@ -32,7 +32,8 @@ extern "C" {
 struct packet_stats {
     uint32_t gradient_beacon_tx;   /**< Gradient Beacon TX count */
     uint32_t heartbeat_tx;         /**< Heartbeat TX count */
-    uint32_t data_tx;              /**< DATA packet TX count */
+    uint32_t data_tx;              /**< DATA packet TX count (Source) */
+    uint32_t data_fwd_tx;          /**< DATA packet Forwarded count (Relay) */
     uint32_t route_change_count;   /**< Number of times best parent changed */
 };
 
@@ -55,6 +56,11 @@ void pkt_stats_inc_heartbeat(void);
  * @brief Increment DATA TX counter
  */
 void pkt_stats_inc_data_tx(void);
+
+/**
+ * @brief Increment DATA Forwarding counter
+ */
+void pkt_stats_inc_data_fwd(void);
 
 /**
  * @brief Increment Route Change counter
@@ -85,6 +91,12 @@ uint32_t pkt_stats_get_heartbeat(void);
  * @return Current count
  */
 uint32_t pkt_stats_get_data_tx(void);
+
+/**
+ * @brief Get DATA Forward count
+ * @return Current count
+ */
+uint32_t pkt_stats_get_data_fwd(void);
 
 /**
  * @brief Get Route Change count

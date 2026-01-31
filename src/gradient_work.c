@@ -40,7 +40,9 @@ LOG_MODULE_REGISTER(gradient_work, LOG_LEVEL_INF);
 
 /* Global gradient server reference */
 static struct bt_mesh_gradient_srv *g_gradient_srv = NULL;
+#ifndef CONFIG_BT_MESH_GRADIENT_SINK_NODE
 static uint16_t last_best_parent_addr = BT_MESH_ADDR_UNASSIGNED;
+#endif
 
 /* Work items */
 static struct k_work_delayable publish_work;
@@ -128,7 +130,7 @@ static void cleanup_handler(struct k_work *work)
         if (nt_is_expired(
                 (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
                 CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                i, current_time, CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS)) {
+                i, CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS, current_time)) {
             
             LOG_WRN("[Cleanup] Node 0x%04x expired (last seen %lld ms ago)",
                     entry->addr, current_time - entry->last_seen);
@@ -213,6 +215,7 @@ static void cleanup_handler(struct k_work *work)
 #endif
     }
     
+#ifndef CONFIG_BT_MESH_GRADIENT_SINK_NODE
     /* [NEW] Detect Parent Change even if Gradient is same */
     const neighbor_entry_t *current_best = nt_best(
         (const neighbor_entry_t *)g_gradient_srv->forwarding_table,
@@ -231,6 +234,7 @@ static void cleanup_handler(struct k_work *work)
             heartbeat_trigger_reset();
         }
     }
+#endif
 
     k_mutex_unlock(&g_gradient_srv->forwarding_table_mutex);
 
@@ -295,6 +299,7 @@ static void gradient_process_handler(struct k_work *work)
 #endif
     }
 
+#ifndef CONFIG_BT_MESH_GRADIENT_SINK_NODE
     /* [NEW] Detect Parent Change even if Gradient is same */
     const neighbor_entry_t *current_best = nt_best(
         (const neighbor_entry_t *)gradient_srv->forwarding_table,
@@ -313,6 +318,7 @@ static void gradient_process_handler(struct k_work *work)
             heartbeat_trigger_reset();
         }
     }
+#endif
     
     gradient_ctx.gradient_srv = NULL;
 }

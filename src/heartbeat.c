@@ -121,7 +121,7 @@ static void heartbeat_work_handler(struct k_work *work)
      */
     uint16_t dummy_addr = 0; 
     int err = data_forward_send_direct(heartbeat_srv, dummy_addr, 
-                                     BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER, 0);
+                                     BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER, 0, 0);
     
     if (err == 0) {
         /* SUCCESS: Increment heartbeat counter */

@@ -182,7 +182,8 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t addr,
                       uint16_t data,
-                      uint32_t timestamp);
+                      uint32_t timestamp,
+                      int8_t initial_rssi);
 
 /** @brief Send BACKPROP_DATA to a specific destination.
  *
@@ -202,25 +203,29 @@ int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv
                                        uint16_t dest_addr,
                                        uint16_t payload);
 
-/** @brief [NEW] Broadcast a REPORT REQUEST to all nodes.
+/** @brief [UPDATED] Broadcast a REPORT REQUEST to all nodes.
  *
  * This function should be called by the SINK NODE to trigger the 
  * end-of-test reporting phase (STOP).
  *
  * @param gradient_srv Pointer to gradient server instance.
+ * @param force_new_id If true, increments the request ID for a new session.
+ *                     If false, re-uses the current ID for reliable re-transmission.
  * @retval 0 Successfully sent.
  */
-int bt_mesh_gradient_srv_send_report_req(struct bt_mesh_gradient_srv *gradient_srv);
+int bt_mesh_gradient_srv_send_report_req(struct bt_mesh_gradient_srv *gradient_srv, bool force_new_id);
 
-/** @brief [NEW] Broadcast a TEST START command to all nodes.
+/** @brief [UPDATED] Broadcast a TEST START command to all nodes.
  *
  * This function should be called by the SINK NODE to trigger the 
  * start of data transmission.
  *
  * @param gradient_srv Pointer to gradient server instance.
+ * @param force_new_id If true, increments the test ID for a new session.
+ *                     If false, re-uses the current ID for reliable re-transmission.
  * @retval 0 Successfully sent.
  */
-int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *gradient_srv);
+int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *gradient_srv, bool force_new_id);
 
 /** @brief [NEW] Send a REPORT RESPONSE (Unicast) to the Sink.
  *

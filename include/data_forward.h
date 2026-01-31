@@ -38,7 +38,7 @@ void data_forward_init(void);
 int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t data, uint16_t original_source, 
                       uint16_t sender_addr, uint8_t current_hop_count,
-                      uint32_t timestamp);
+                      uint32_t timestamp, int8_t path_min_rssi);
 
 /**
  * @brief Send data packet directly (for button press, no retry on sender skip)
@@ -50,7 +50,8 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
  * @return 0 on success, negative error code on failure
  */
 int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
-                             uint16_t addr, uint16_t data, uint32_t timestamp);
+                             uint16_t addr, uint16_t data, 
+                             uint32_t timestamp, int8_t initial_rssi);
 
 const neighbor_entry_t *find_strict_upstream_parent(
     struct bt_mesh_gradient_srv *srv, uint16_t exclude_addr);

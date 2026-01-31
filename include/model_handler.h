@@ -20,6 +20,9 @@ extern "C" {
 
 const struct bt_mesh_comp *model_handler_init(void);
 
+void sink_start_test(void);
+void sink_stop_test(void);
+
 #ifdef __cplusplus
 }
 #endif
