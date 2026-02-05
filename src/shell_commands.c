@@ -542,6 +542,39 @@ static int cmd_mesh_report_stop(const struct shell *sh, size_t argc, char **argv
 }
 
 /*============================================================================*/
+/*                         Command: mesh stress_dl                            */
+/*============================================================================*/
+
+/**
+ * @brief Test Downlink Stress (Unicast BACKPROP) -> REPORT
+ * Lệnh: mesh stress_dl <target_addr>
+ */
+static int cmd_mesh_stress_dl(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc != 2) {
+        shell_print(sh, "Su dung: mesh stress_dl <target_hex>");
+        return -EINVAL;
+    }
+
+    char *endptr;
+    unsigned long addr = strtoul(argv[1], &endptr, 0); // Auto detect hex/dec
+    
+    if (*endptr != '\0' || addr > 0xFFFF) {
+        shell_error(sh, "Dia chi khong hop le: %s", argv[1]);
+        return -EINVAL;
+    }
+
+    /* Kiểm tra có phải Gateway không */
+    if (gradient_srv.gradient != 0) {
+        shell_error(sh, "Chi Gateway (gradient=0) moi co the chay stress test!");
+        return -ENOEXEC;
+    }
+
+    sink_start_stress_test((uint16_t)addr);
+    return 0;
+}
+
+/*============================================================================*/
 /*                         Command: mesh stats                                */
 /*============================================================================*/
 
@@ -656,6 +689,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(mesh_cmds,
     SHELL_CMD_ARG(heartbeat, NULL,
         "Hien thi trang thai heartbeat",
         cmd_mesh_heartbeat, 1, 0),
+
+    SHELL_CMD_ARG(stress_dl, NULL,
+        "Chay Stress Test DL: mesh stress_dl <addr>",
+        cmd_mesh_stress_dl, 2, 0),
 
     SHELL_CMD(stats, &stats_subcmds,
         "Thong ke goi tin TX (mesh stats | mesh stats reset)",

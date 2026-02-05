@@ -26,6 +26,7 @@ static atomic_t heartbeat_count = ATOMIC_INIT(0);
 static atomic_t data_tx_count = ATOMIC_INIT(0);
 static atomic_t data_fwd_count = ATOMIC_INIT(0);
 static atomic_t route_change_count = ATOMIC_INIT(0);
+static atomic_t rx_data_count = ATOMIC_INIT(0); /* [NEW] */
 static bool stats_enabled = false;
 
 /*============================================================================*/
@@ -39,6 +40,7 @@ void pkt_stats_init(void)
     atomic_set(&data_tx_count, 0);
     atomic_set(&data_fwd_count, 0);
     atomic_set(&route_change_count, 0);
+    atomic_set(&rx_data_count, 0); /* [NEW] */
     
     LOG_INF("[PktStats] Initialized - all counters reset");
 }
@@ -73,6 +75,12 @@ void pkt_stats_inc_route_change(void)
     atomic_inc(&route_change_count);
 }
 
+void pkt_stats_inc_rx(void)
+{
+    if (!stats_enabled) return;
+    atomic_inc(&rx_data_count);
+}
+
 void pkt_stats_get(struct packet_stats *stats)
 {
     if (stats == NULL) {
@@ -84,6 +92,7 @@ void pkt_stats_get(struct packet_stats *stats)
     stats->data_tx = (uint32_t)atomic_get(&data_tx_count);
     stats->data_fwd_tx = (uint32_t)atomic_get(&data_fwd_count);
     stats->route_change_count = (uint32_t)atomic_get(&route_change_count);
+    stats->rx_data_count = (uint32_t)atomic_get(&rx_data_count); /* [NEW] */
 }
 
 uint32_t pkt_stats_get_gradient_beacon(void)
@@ -111,6 +120,11 @@ uint32_t pkt_stats_get_route_change(void)
     return (uint32_t)atomic_get(&route_change_count);
 }
 
+uint32_t pkt_stats_get_rx(void)
+{
+    return (uint32_t)atomic_get(&rx_data_count);
+}
+
 uint32_t pkt_stats_get_control_total(void)
 {
     return pkt_stats_get_gradient_beacon() + pkt_stats_get_heartbeat();
@@ -123,6 +137,7 @@ void pkt_stats_reset(void)
     atomic_set(&data_tx_count, 0);
     atomic_set(&data_fwd_count, 0);
     atomic_set(&route_change_count, 0);
+    atomic_set(&rx_data_count, 0); /* [NEW] */
     
     LOG_INF("[PktStats] All counters reset to 0");
 }

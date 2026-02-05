@@ -23,6 +23,8 @@ const struct bt_mesh_comp *model_handler_init(void);
 void sink_start_test(void);
 void sink_stop_test(void);
 
+void sink_start_stress_test(uint16_t target_addr); /* [NEW] */
+
 #ifdef __cplusplus
 }
 #endif

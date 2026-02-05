@@ -35,6 +35,7 @@ struct packet_stats {
     uint32_t data_tx;              /**< DATA packet TX count (Source) */
     uint32_t data_fwd_tx;          /**< DATA packet Forwarded count (Relay) */
     uint32_t route_change_count;   /**< Number of times best parent changed */
+    uint32_t rx_data_count;        /**< [NEW] Count received DATA/BACKPROP at destination */
 };
 
 /**
@@ -103,6 +104,17 @@ uint32_t pkt_stats_get_data_fwd(void);
  * @return Current count
  */
 uint32_t pkt_stats_get_route_change(void);
+
+/**
+ * @brief Increment RX Data counter
+ */
+void pkt_stats_inc_rx(void);
+
+/**
+ * @brief Get RX Data count
+ * @return Current count
+ */
+uint32_t pkt_stats_get_rx(void);
 
 /**
  * @brief Get total CONTROL packet count (Beacon + Heartbeat)

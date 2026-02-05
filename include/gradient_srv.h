@@ -43,6 +43,14 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_REPORT_ACK BT_MESH_MODEL_OP_3(0x10, \
                         BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
+/* [NEW] Report Request Unicast opcode (Unicast from Sink to Node - STRESS STATS) */
+#define BT_MESH_GRADIENT_SRV_OP_REPORT_REQ_UNICAST BT_MESH_MODEL_OP_3(0x11, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
+/* [NEW] Downlink Report opcode (Unicast from Sink to Node - FINAL STATS) */
+#define BT_MESH_GRADIENT_SRV_OP_DOWNLINK_REPORT BT_MESH_MODEL_OP_3(0x12, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
 /* .. include_endpoint_gradient_srv_rst_1 */
 
 /** Default TTL for BACKPROP packets */
@@ -237,6 +245,19 @@ int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *gradient_s
  * @retval 0 Successfully sent.
  */
 int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_srv);
+
+/** @brief [NEW] Send a DOWNLINK REPORT (Unicast) to a Sensor Node.
+ *
+ * This function should be called by the SINK NODE to send its final
+ * TX count to the target Sensor.
+ *
+ * @param gradient_srv Pointer to gradient server instance.
+ * @param dest_addr Target sensor address.
+ * @param total_tx Total packets sent by Sink.
+ * @retval 0 Successfully sent.
+ */
+int bt_mesh_gradient_srv_send_downlink_report(struct bt_mesh_gradient_srv *gradient_srv, 
+                                              uint16_t dest_addr, uint16_t total_tx);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

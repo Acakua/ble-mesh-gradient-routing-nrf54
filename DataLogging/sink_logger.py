@@ -6,7 +6,7 @@ import os
 import sys
 
 # --- CẤU HÌNH ---
-SERIAL_PORT = 'COM32'  # Đảm bảo đúng cổng COM của bạn
+SERIAL_PORT = 'COM36'  # Đảm bảo đúng cổng COM của bạn
 BAUD_RATE = 115200
 LOG_DIR = r"C:\ncs\v3.0.1\zephyr\samples\GRADIENT-SRV\DataLogging"
 
@@ -59,6 +59,7 @@ def main():
                 "RouteChanges",
                 "FwdCount",     # [NEW] Số bản tin node này đã chuyển tiếp giúp node khác
                 "Rx_Unique_Count", 
+                "Remote_Rx_Count", # [NEW] Số gói tin node đích nhận được (cho Downlink)
                 "PDR_Percent"
             ]
             writer.writerow(headers)
@@ -160,6 +161,9 @@ def main():
                                         measured_rx = 0
 
                                     pdr = (measured_rx / data_tx * 100.0) if data_tx > 0 else 0.0
+                                    
+                                    # [NEW] Parse Remote Rx (from parts[7])
+                                    remote_rx = parts[7] if len(parts) > 7 else "0"
 
                                     row[2] = src_hex
                                     row[4] = str(data_tx)     # TxCount (Node)
@@ -168,12 +172,14 @@ def main():
                                     row[10] = parts[5]        # RouteChanges
                                     row[11] = parts[6]        # FwdCount
                                     row[12] = str(measured_rx) # Unique Count (Gateway)
-                                    row[13] = f"{pdr:.2f}"
+                                    row[13] = str(remote_rx)   # Remote Rx (Node)
+                                    row[14] = f"{pdr:.2f}"
 
                                     print(f"\n[{now}] >>> FINAL REPORT {src_hex} <<<")
                                     print(f"    Tx (Node):   {data_tx}")
                                     print(f"    Rx (Unique): {measured_rx}")
-                                    print(f"    PDR:         {pdr:.2f}%")
+                                    print(f"    Rx (Remote): {remote_rx} (For Downlink)")
+                                    print(f"    PDR (Up):    {pdr:.2f}%")
                                     print(f"    Fwd Count:   {parts[6]} packets")
                                     print("---------------------------------------------")
 

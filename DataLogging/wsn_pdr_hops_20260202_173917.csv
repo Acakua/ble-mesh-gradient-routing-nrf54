@@ -1,0 +1,9 @@
+﻿Timestamp,Type,SourceAddr,SenderAddr,Seq_or_TxCount,HopCount,Latency_ms,PathMinRSSI,BeaconTx,HeartbeatTx,RouteChanges,FwdCount,Rx_Unique_Count,PDR_Percent
+17:39:34.910,EVENT,TEST_START,Duration_ms=3600000,,,,,,,,,,
+17:39:35.860,DATA,0x0228,0x0228,1,1,122,-54,,,,,,
+17:39:37.330,DATA,0x0228,0x0228,2,1,0,-61,,,,,,
+17:39:38.102,DATA,0x0228,0x0228,3,1,0,-56,,,,,,
+17:39:39.129,DATA,0x0228,0x0228,4,1,0,-59,,,,,,
+17:39:40.205,DATA,0x0228,0x0228,5,1,0,-59,,,,,,
+17:39:41.322,EVENT,TEST_STOP,Finished,,,,,,,,,,
+17:39:43.801,REPORT,0x0228,,6,,,,1,0,0,0,5,83.33

@@ -236,16 +236,46 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     uint16_t sender_addr = ctx->addr;
     
     uint16_t final_dest = net_buf_simple_pull_le16(buf);
-    uint8_t ttl = net_buf_simple_pull_u8(buf);
     uint16_t payload = net_buf_simple_pull_le16(buf);
+    uint8_t ttl = net_buf_simple_pull_u8(buf);
+    uint8_t hop_count = net_buf_simple_pull_u8(buf);
+    uint32_t timestamp = net_buf_simple_pull_le32(buf);
+    int8_t path_min_rssi = (int8_t)net_buf_simple_pull_u8(buf);
+
+    /* Update path min RSSI */
+    int8_t current_rssi = ctx->recv_rssi;
+    if (current_rssi < path_min_rssi) {
+        path_min_rssi = current_rssi;
+    }
     
-    LOG_INF("[CONTROL - Backprop] Recv: dest=0x%04x, payload=%d, from=0x%04x", final_dest, payload, sender_addr);
+    LOG_INF("[CONTROL - Backprop] Recv: dest=0x%04x, payload=%d, hops=%d, from=0x%04x", 
+            final_dest, payload, hop_count, sender_addr);
     
     if (final_dest == my_addr) {
-        LOG_INF("[CONTROL - Backprop] Destination Reached! Payload: %d", payload);
-        led_indicate_backprop_received();
-        if (gradient_srv->handlers->data_received) {
-            gradient_srv->handlers->data_received(gradient_srv, payload);
+        /* [RELATIVE LATENCY] */
+        uint32_t now_rel = k_uptime_get_32() - (g_test_start_time > 0 ? g_test_start_time : k_uptime_get_32());
+        uint32_t delay_ms = (now_rel >= timestamp) ? (now_rel - timestamp) : 0;
+
+        if (payload == 0xFFFE) {
+            LOG_WRN("[CONTROL] Received REPORT REQ (via Backprop)!");
+            if (gradient_srv->handlers->report_req_received) {
+                gradient_srv->handlers->report_req_received(gradient_srv);
+            }
+        } else if (payload == 0xFFFD) {
+            LOG_INF("[CONTROL] Received STATS RESET (via Backprop)!");
+            pkt_stats_reset();
+        } else {
+            /* [NEW] CSV LOG AT SENSOR FOR DOWNLINK */
+            printk("CSV_LOG,BACKPROP,0x%04x,0x%04x,%d,%d,%u,%d\n", 
+                   my_addr, sender_addr, payload, hop_count, delay_ms, path_min_rssi);
+
+            LOG_INF("[CONTROL - Backprop] Destination Reached! Payload: %d, Hops: %d, Delay: %u ms", 
+                    payload, hop_count, delay_ms);
+            pkt_stats_inc_rx();
+            led_indicate_backprop_received();
+            if (gradient_srv->handlers->data_received) {
+                gradient_srv->handlers->data_received(gradient_srv, payload);
+            }
         }
         return 0;
     }
@@ -263,12 +293,17 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
         return 0;
     }
     
-    /* Forwarding */
-    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA, 5);
+    /* Forwarding: Cấu trúc mới 11 bytes */
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA, 11);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA);
+    
+    /* Re-pack for next hop */
     net_buf_simple_add_le16(&msg, final_dest);
-    net_buf_simple_add_u8(&msg, ttl - 1);
     net_buf_simple_add_le16(&msg, payload);
+    net_buf_simple_add_u8(&msg, ttl - 1);
+    net_buf_simple_add_u8(&msg, hop_count + 1);
+    net_buf_simple_add_le32(&msg, timestamp);
+    net_buf_simple_add_u8(&msg, (uint8_t)path_min_rssi);
     
     struct bt_mesh_msg_ctx tx_ctx = {
         .app_idx = gradient_srv->model->keys[0],
@@ -278,6 +313,27 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     
     bt_mesh_model_send(gradient_srv->model, &tx_ctx, &msg, NULL, NULL);
     return 0;
+}
+
+static int handle_downlink_report(const struct bt_mesh_model *model, 
+                                     struct bt_mesh_msg_ctx *ctx,
+                                     struct net_buf_simple *buf)
+{
+	uint16_t sink_addr = ctx->addr;
+	uint16_t total_tx_by_sink = net_buf_simple_pull_le16(buf);
+	
+	struct packet_stats stats;
+	pkt_stats_get(&stats);
+
+	/* [MATCHING SINK_LOGGER] Print report in standard format at Sensor */
+	/* Format: TYPE, Src, TotalTx, TotalRx, ... (simplified for Downlink) */
+	printk("CSV_LOG,REPORT,0x%04x,%u,%u,0,0,0,0\n", 
+		   sink_addr, total_tx_by_sink, stats.rx_data_count);
+
+	LOG_INF(">>> DOWNLINK REPORT RECEIVED FROM SINK 0x%04x: PDR %u/%u <<<", 
+			sink_addr, stats.rx_data_count, total_tx_by_sink);
+	
+	return 0;
 }
 
 /**
@@ -330,6 +386,29 @@ static int handle_report_req(const struct bt_mesh_model *model,
 
         (void)bt_mesh_model_send(model, &send_ctx, &msg, NULL, NULL);
     }
+    
+    return 0;
+}
+
+/**
+ * @brief [NEW] Handle REPORT REQUEST UNICAST (Unicast from Sink)
+ * Triggered at Sensor Nodes (STOP & REPORT specific node)
+ * Logic: Receive -> Action (No re-broadcast)
+ */
+static int handle_report_req_unicast(const struct bt_mesh_model *model,
+                                     struct bt_mesh_msg_ctx *ctx,
+                                     struct net_buf_simple *buf)
+{
+    struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+    
+    LOG_WRN(">>> RX UNICAST REPORT REQ from 0x%04x <<<", ctx->addr);
+    
+    /* Action: Notify app to stop sending/report */
+    if (srv->handlers->report_req_received) {
+        srv->handlers->report_req_received(srv);
+    }
+    
+    /* The app handler triggers report_retry_work which sends REPORT_RSP */
     
     return 0;
 }
@@ -431,8 +510,8 @@ static void report_retry_handler(struct k_work *work)
     struct packet_stats stats;
     pkt_stats_get(&stats);
 
-    /* [MODIFIED] Payload size 12 bytes */
-    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 12);
+    /* [MODIFIED] Payload size 14 bytes (Added RxCount) */
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 14);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP);
     
     /* Gắn thêm địa chỉ nguồn gốc (Reporter) vào payload để Relay/Sink nhận diện đúng */
@@ -444,6 +523,7 @@ static void report_retry_handler(struct k_work *work)
     net_buf_simple_add_le16(&msg, (uint16_t)stats.heartbeat_tx);
     net_buf_simple_add_le16(&msg, (uint16_t)stats.route_change_count);
     net_buf_simple_add_le16(&msg, (uint16_t)stats.data_fwd_tx);
+    net_buf_simple_add_le16(&msg, (uint16_t)stats.rx_data_count); /* [NEW] */
 
     /* [DYNAMIC PARENT SWITCHING] 
      * Thay đổi Parent dựa trên số lần Retry để tránh bị kẹt tại một Relay chết.
@@ -544,8 +624,8 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
                              struct bt_mesh_msg_ctx *ctx,
                              struct net_buf_simple *buf)
 {
-    /* Kiểm tra chiều dài payload (12 bytes: ReporterAddr(2) + 5 stats * 2) */
-    if (buf->len < 12) return -EINVAL;
+    /* Kiểm tra chiều dài payload (14 bytes: ReporterAddr(2) + 6 stats * 2) */
+    if (buf->len < 14) return -EINVAL;
 
     uint16_t reporter_addr = net_buf_simple_pull_le16(buf);
     uint16_t data_tx = net_buf_simple_pull_le16(buf);
@@ -553,6 +633,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
     uint16_t hb_tx = net_buf_simple_pull_le16(buf);
     uint16_t route_changes = net_buf_simple_pull_le16(buf);
     uint16_t data_fwd = net_buf_simple_pull_le16(buf);
+    uint16_t rx_count = net_buf_simple_pull_le16(buf); /* [NEW] */
     
     struct bt_mesh_gradient_srv *srv = model->rt->user_data; 
     
@@ -563,9 +644,9 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
                 reporter_addr, ctx->addr);
         
         // Format log cho Python script (Dùng reporter_addr để định danh đúng node)
-        // [NEW] Format: TYPE, Src, Tx, Beacon, HB, RouteChanges, FwdCount
-        printk("CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u,%u\n", 
-               reporter_addr, data_tx, beacon_tx, hb_tx, route_changes, data_fwd);
+        // [NEW] Format: TYPE, Src, Tx, Beacon, HB, RouteChanges, FwdCount, RxCount
+        printk("CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u,%u,%u\n", 
+               reporter_addr, data_tx, beacon_tx, hb_tx, route_changes, data_fwd, rx_count);
                
         /* SEND ACK via Reverse Routing tới Reporter gốc */
         uint16_t nexthop = rrt_find_nexthop(srv->forwarding_table, 
@@ -595,7 +676,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
         if (best_parent != NULL) {
             LOG_INF("Relaying REPORT from 0x%04x to Parent 0x%04x", reporter_addr, best_parent->addr);
 
-            BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 12);
+            BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 14);
             bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_REPORT_RSP);
             net_buf_simple_add_le16(&msg, reporter_addr); // RE-PACK ORIGINAL REPORTER
             net_buf_simple_add_le16(&msg, data_tx);
@@ -603,6 +684,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
             net_buf_simple_add_le16(&msg, hb_tx);
             net_buf_simple_add_le16(&msg, route_changes);
             net_buf_simple_add_le16(&msg, data_fwd);
+            net_buf_simple_add_le16(&msg, rx_count); /* [NEW] */
 
             struct bt_mesh_msg_ctx fwd_ctx = {
                 .app_idx = model->keys[0],
@@ -638,7 +720,7 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     },
     {
         BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA,
-        BT_MESH_LEN_EXACT(5),
+        BT_MESH_LEN_EXACT(11),
         handle_backprop_message
     },
     /* [UPDATED] Report Req expects 1 byte ID now */
@@ -649,13 +731,23 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     },
     { 
         BT_MESH_GRADIENT_SRV_OP_REPORT_RSP, 
-        BT_MESH_LEN_EXACT(12), 
+        BT_MESH_LEN_EXACT(14), 
         handle_report_rsp 
+    },
+    { 
+        BT_MESH_GRADIENT_SRV_OP_REPORT_REQ_UNICAST, 
+        BT_MESH_LEN_EXACT(0), /* No payload */
+        handle_report_req_unicast 
     },
     { 
         BT_MESH_GRADIENT_SRV_OP_REPORT_ACK, 
         BT_MESH_LEN_EXACT(2), 
         handle_report_ack 
+    },
+    {
+        BT_MESH_GRADIENT_SRV_OP_DOWNLINK_REPORT,
+        BT_MESH_LEN_EXACT(2),
+        handle_downlink_report
     },
     { 
         BT_MESH_GRADIENT_SRV_OP_TEST_START, 
@@ -783,11 +875,21 @@ int bt_mesh_gradient_srv_backprop_send(struct bt_mesh_gradient_srv *gradient_srv
     
     if (nexthop == BT_MESH_ADDR_UNASSIGNED) return -ENETUNREACH;
     
-    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA, 5);
+    /* Đóng gói cấu trúc 11 bytes: Dest(2) | Payload(2) | TTL(1) | Hops(1) | TS(4) | MinRSSI(1) */
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA, 11);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_DATA);
+    
     net_buf_simple_add_le16(&msg, dest_addr);
-    net_buf_simple_add_u8(&msg, BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL);
     net_buf_simple_add_le16(&msg, payload);
+    net_buf_simple_add_u8(&msg, BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL);
+    net_buf_simple_add_u8(&msg, 1); // Initial hop count
+    
+    /* [RELATIVE TIMESTAMP] */
+    uint32_t timestamp = k_uptime_get_32() - (g_test_start_time > 0 ? g_test_start_time : k_uptime_get_32());
+    net_buf_simple_add_le32(&msg, timestamp);
+    
+    /* [INITIAL RSSI] Sink bắt đầu với 0 (lớn nhất) */
+    net_buf_simple_add_u8(&msg, 0);
     
     struct bt_mesh_msg_ctx ctx = {
         .app_idx = gradient_srv->model->keys[0],
@@ -867,4 +969,30 @@ int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_s
     k_work_schedule(&gradient_srv->report_retry_work, K_MSEC(initial_jitter));
     
     return 0;
+}
+
+int bt_mesh_gradient_srv_send_downlink_report(struct bt_mesh_gradient_srv *gradient_srv, 
+                                              uint16_t dest_addr, uint16_t total_tx)
+{
+    uint16_t nexthop = rrt_find_nexthop(gradient_srv->forwarding_table,
+                                        CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                                        dest_addr);
+    
+    if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+        LOG_ERR("No route to send Downlink Report to 0x%04x", dest_addr);
+        return -ENETUNREACH;
+    }
+
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_DOWNLINK_REPORT, 2);
+    bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_DOWNLINK_REPORT);
+    net_buf_simple_add_le16(&msg, total_tx);
+
+    struct bt_mesh_msg_ctx ctx = {
+        .app_idx = gradient_srv->model->keys[0],
+        .addr = nexthop,
+        .send_ttl = BT_MESH_TTL_DEFAULT,
+    };
+
+    LOG_INF("Sending Downlink Report to 0x%04x (via 0x%04x), TX: %u", dest_addr, nexthop, total_tx);
+    return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
 }

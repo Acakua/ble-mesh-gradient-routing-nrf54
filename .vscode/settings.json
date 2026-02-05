@@ -3,5 +3,8 @@
         "*.ejs": "html",
         "log.h": "c",
         "mesh.h": "c"
+    },
+    "nrf-connect.debugging.bindings": {
+        "${workspaceFolder}/build/GRADIENT-SRV": "Launch GRADIENT-SRV/build/GRADIENT-SRV"
     }
 }

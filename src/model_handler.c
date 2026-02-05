@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
  * CẤU HÌNH TEST (TEST CONFIGURATION)
  * ========================================== */
 // 1. Cấu hình thời gian chạy test (1 phút)
-#define TEST_DURATION_MINUTES   2
+#define TEST_DURATION_MINUTES   60
 #define TEST_DURATION_MS        (TEST_DURATION_MINUTES * 60 * 1000) 
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
@@ -56,11 +56,21 @@ static bool is_test_running = false;
 // --- SENSOR NODE VARIABLES ---
 static struct k_work_delayable send_data_work;
 static bool is_sending_active = false; 
+static bool is_sensor_test_active = false; /* [NEW] Manual toggle via Button 3 */
+
+// --- SINK STRESS TEST VARIABLES ---
+static struct k_work_delayable stress_tx_work;
+static struct k_work_delayable stress_timeout_work;
+static bool is_sink_stress_active = false;
+static uint16_t stress_target_addr = BT_MESH_ADDR_UNASSIGNED;
+static uint32_t g_stress_tx_count = 0; /* [NEW] Counter for downlink stress test */
 
 /* Forward declarations */
 static void button_handler(uint32_t button_state, uint32_t has_changed);
 static void auto_stop_handler(struct k_work *work); 
 static void send_data_handler(struct k_work *work); 
+static void stress_tx_handler(struct k_work *work); /* [NEW] */
+static void stress_timeout_handler(struct k_work *work); /* [NEW] */
 static void print_neighbor_table(void); 
 
 /******************************************************************************/
@@ -234,6 +244,10 @@ const struct bt_mesh_comp *model_handler_init(void)
     // [INIT] Timers
     k_work_init_delayable(&auto_stop_work, auto_stop_handler); // Cho Sink
     k_work_init_delayable(&send_data_work, send_data_handler);     // Cho Sensor
+    
+    /* [NEW] Sink Stress Test Timers */
+    k_work_init_delayable(&stress_tx_work, stress_tx_handler);
+    k_work_init_delayable(&stress_timeout_work, stress_timeout_handler);
 
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
     gradient_srv.gradient = 0;
@@ -284,31 +298,38 @@ void sink_start_test(void)
 
 void sink_stop_test(void)
 {
-    if (!is_test_running) return;
-
-    LOG_INF("\n>>> SINK: STOPPING TEST & REQUESTING REPORT <<<");
+    if (!is_test_running && !is_sink_stress_active) return;
 
     /* 0. Ngừng thống kê gói tin */
+    bool was_broadcast = is_test_running;
+    bool was_stress = is_sink_stress_active;
+    
     pkt_stats_set_enabled(false);
 
-    /* 1. Broadcast lệnh STOP & REPORT (Gửi 3 lần với CÙNG ID để đảm bảo độ tin cậy) */
-    // Phát lần đầu với force_new_id = true để tăng ID máy phát
-    bt_mesh_gradient_srv_send_report_req(&gradient_srv, true);
-    
-    // Hai lần sau phát lại với cùng ID đó (force_new_id = false)
-    for (int i = 0; i < 2; i++) {
-        k_sleep(K_MSEC(100));
-        bt_mesh_gradient_srv_send_report_req(&gradient_srv, false);
+    if (was_broadcast) {
+        LOG_INF("\n>>> SINK: STOPPING BROADCAST TEST & REQUESTING REPORT <<<");
+        /* 1. Broadcast lệnh STOP & REPORT */
+        bt_mesh_gradient_srv_send_report_req(&gradient_srv, true);
+        for (int i = 0; i < 2; i++) {
+            k_sleep(K_MSEC(100));
+            bt_mesh_gradient_srv_send_report_req(&gradient_srv, false);
+        }
+        k_work_cancel_delayable(&auto_stop_work);
+        is_test_running = false;
+        printk("CSV_LOG,EVENT,TEST_STOP,Finished\n");
     }
-    
-    /* 2. Hủy timer (đề phòng trường hợp gọi thủ công trước khi hết giờ) */
-    k_work_cancel_delayable(&auto_stop_work);
-    is_test_running = false;
-    
-    /* 3. Log event */
-    printk("CSV_LOG,EVENT,TEST_STOP,Finished\n");
-    
-    /* Nháy đèn báo hiệu */
+
+    if (was_stress) {
+        LOG_INF("\n>>> SINK: STOPPING STRESS TEST & SENDING REPORT <<<");
+        is_sink_stress_active = false;
+        k_work_cancel_delayable(&stress_tx_work);
+        k_work_cancel_delayable(&stress_timeout_work);
+        
+        LOG_INF("Sending Downlink Report to 0x%04x (TX: %u)...", stress_target_addr, g_stress_tx_count);
+        bt_mesh_gradient_srv_send_downlink_report(&gradient_srv, stress_target_addr, (uint16_t)g_stress_tx_count);
+    }
+
+    /* Nháy đèn báo hiệu kết thúc */
     led_indicate_attention(true);
     k_sleep(K_MSEC(1000));
     led_indicate_attention(false);
@@ -331,7 +352,7 @@ static void send_data_handler(struct k_work *work)
      * Nếu đã nhận lệnh STOP, tuyệt đối không chạy tiếp logic bên dưới.
      * Điều này ngăn chặn việc gửi dư gói tin (PDR > 100%).
      */
-    if (!is_sending_active) {
+    if (!is_sending_active && !is_sensor_test_active) {
         return; 
     }
 
@@ -373,7 +394,7 @@ static void send_data_handler(struct k_work *work)
     }
 
     /* CHỈ LÊN LỊCH TIẾP NẾU VẪN CÒN ĐANG CHẠY */
-    if (is_sending_active) {
+    if (is_sending_active || is_sensor_test_active) {
         /* Thêm Jitter nhỏ vào mỗi gói tin để tránh hiện tượng rượt đuổi (Sync collision) */
         uint32_t next_jitter = sys_rand32_get() % 200;
        k_work_reschedule(&send_data_work, K_MSEC(SENSOR_SEND_INTERVAL_MS + next_jitter));
@@ -443,7 +464,24 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 
         /* Nút này dành riêng cho Sink Node (Gateway) */
         if (gradient_srv.gradient != 0) {
-            LOG_WRN("Button 3 is reserved for Sink Node to control test.");
+            /* [NEW] Sensor Node Local Test Mode */
+            if (!is_sensor_test_active) {
+                LOG_INF(">>> SENSOR: STARTING LOCAL TEST <<<");
+                is_sensor_test_active = true;
+                g_test_data_tx_count = 0;
+                pkt_stats_set_enabled(true);
+                pkt_stats_reset();
+                k_work_schedule(&send_data_work, K_NO_WAIT);
+            } else {
+                LOG_INF(">>> SENSOR: STOPPING LOCAL TEST <<<");
+                is_sensor_test_active = false;
+                k_work_cancel_delayable(&send_data_work);
+                
+                /* Report Local Stats */
+                struct packet_stats stats;
+                pkt_stats_get(&stats);
+                LOG_INF("Local Test Stopped. TX: %u, RX Backprop: %u", stats.data_tx, stats.rx_data_count);
+            }
             return;
         }
 
@@ -474,4 +512,79 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
         /* Thực hiện Cold Reboot (Tương đương bấm nút Reset cứng) */
         sys_reboot(SYS_REBOOT_COLD);
     }
+}
+
+void sink_start_stress_test(uint16_t target_addr)
+{
+    if (gradient_srv.gradient != 0) {
+        LOG_WRN("Only Sink can start stress test");
+        return;
+    }
+
+    if (is_test_running || is_sink_stress_active) {
+        LOG_WRN("Test already running. Stop it first.");
+        return;
+    }
+
+    LOG_INF(">>> SINK: STARTING STRESS TEST to 0x%04x (Duration: %d ms) <<<", target_addr, TEST_DURATION_MS);
+    
+    is_sink_stress_active = true;
+    stress_target_addr = target_addr;
+    
+    /* Reset counters at Sink to track what we send */
+    pkt_stats_set_enabled(true);
+    pkt_stats_reset();
+    g_test_start_time = k_uptime_get_32();
+    g_stress_tx_count = 0; /* Reset stress counter */
+
+    /* [NEW] Send STATS RESET Signal to Target (Payload 0xFFFD) */
+    /* This ensures the sensor resets its RX counters before we start flooding */
+    LOG_INF("Sending STATS RESET signal to 0x%04x...", target_addr);
+    bt_mesh_gradient_srv_backprop_send(&gradient_srv, stress_target_addr, 0xFFFD);
+    
+    /* Small delay to ensure Reset arrives before Data */
+    k_sleep(K_MSEC(100));
+
+    /* 1. Start sending loop */
+    k_work_schedule(&stress_tx_work, K_NO_WAIT);
+    
+    /* 2. Start timeout to stop */
+    k_work_schedule(&stress_timeout_work, K_MSEC(TEST_DURATION_MS));
+    
+    /* Nháy đèn báo hiệu */
+    led_indicate_attention(true);
+}
+
+static void stress_tx_handler(struct k_work *work)
+{
+    if (!is_sink_stress_active) return;
+    
+    /* Send Backprop */
+    g_total_tx_count++;
+    g_stress_tx_count++;   /* Increment stress counter */
+    pkt_stats_inc_data_tx(); // Count TX at Sink
+    
+    /* Gửi Payload là sequence number tăng dần */
+    int err = bt_mesh_gradient_srv_backprop_send(&gradient_srv, stress_target_addr, g_total_tx_count);
+    if (err) {
+        LOG_WRN("Stress Backprop failed: %d", err);
+    }
+    
+    /* Schedule next */
+    if (is_sink_stress_active) {
+         /* Gửi mỗi 1s */
+        k_work_reschedule(&stress_tx_work, K_MSEC(1000));
+    }
+}
+
+static void stress_timeout_handler(struct k_work *work)
+{
+    LOG_INF("=== STRESS TEST FINISHED ===");
+    is_sink_stress_active = false;
+    k_work_cancel_delayable(&stress_tx_work);
+    led_indicate_attention(false);
+    
+    /* Send Final Downlink Report */
+    LOG_INF("Sending Final Downlink Report to 0x%04x (TX: %u)...", stress_target_addr, g_stress_tx_count);
+    bt_mesh_gradient_srv_send_downlink_report(&gradient_srv, stress_target_addr, (uint16_t)g_stress_tx_count);
 }
