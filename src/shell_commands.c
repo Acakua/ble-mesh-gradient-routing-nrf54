@@ -464,7 +464,7 @@ static int cmd_mesh_data(const struct shell *sh, size_t argc, char **argv)
                 payload, nexthop);
 
     /* Gửi DATA */
-    int err = bt_mesh_gradient_srv_data_send(&gradient_srv, nexthop, (uint16_t)payload, 0, 0);
+    int err = bt_mesh_gradient_srv_data_send(&gradient_srv, nexthop, (uint16_t)payload, 0);
 
     if (err == 0) {
         shell_print(sh, "DATA da gui thanh cong!");

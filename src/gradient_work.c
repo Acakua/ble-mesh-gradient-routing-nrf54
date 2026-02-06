@@ -86,7 +86,6 @@ static void publish_handler(struct k_work *work)
             if (err) {
                 LOG_WRN("Gradient publish failed: %d", err);
             } else {
-                pkt_stats_inc_gradient_beacon();
                 LOG_DBG("Gradient published: %d", g_gradient_srv->gradient);
             }
         }
@@ -192,7 +191,8 @@ static void cleanup_handler(struct k_work *work)
                 
                 g_gradient_srv->gradient = new_gradient;
 
-                if (old_gradient != new_gradient) {
+                if (rp_should_update_my_gradient(old_gradient, best_parent_gradient)) {
+                     g_gradient_srv->gradient = new_gradient;
                      LOG_INF("[Cleanup] Gradient updated: [%d] -> [%d]",
                             old_gradient, g_gradient_srv->gradient);
                      /* Gradient change will trigger Heartbeat Reset internally */
@@ -258,7 +258,7 @@ static void gradient_process_handler(struct k_work *work)
     
     if (!gradient_srv) return;
 
-    LOG_DBG("Received gradient %d from 0x%04x (RSSI: %d)", msg, sender_addr, rssi);
+    LOG_INF("Received gradient %d from 0x%04x (RSSI: %d)", msg, sender_addr, rssi);
     
     int64_t current_time = k_uptime_get();
     

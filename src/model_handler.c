@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
 #define TEST_DURATION_MS        (TEST_DURATION_MINUTES * 60 * 1000) 
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 1000  // Tăng lên 2 giây để giảm nghẽn mạng
+#define SENSOR_SEND_INTERVAL_MS 5000
 
 /* ==========================================
  * GLOBALS & WORK ITEMS
@@ -140,8 +140,11 @@ static void handle_test_start_received(struct bt_mesh_gradient_srv *srv)
     /* 3. Bật lại trạng thái và khởi động Timer mới */
     is_sending_active = true;
     
-    /* 4. Jitter ngẫu nhiên lớn để tránh các node gửi cùng lúc */
-    uint32_t start_delay = sys_rand32_get() % 1000; 
+    /* 4. [NEW] Staggered Start: Trì hoãn theo Gradient để tránh nghẽn tại Sink
+     * Delay = (Gradient * 60000ms) + Jitter(0-40000ms)
+     * Giúp các node bắt đầu cách nhau vài phút để ổn định mạng.
+     */
+    uint32_t start_delay = (srv->gradient * 60000) + (sys_rand32_get() % 40000); 
     k_work_schedule(&send_data_work, K_MSEC(start_delay));
     
     /* 5. Nháy đèn liên tục để báo hiệu đang TRONG CHẾ ĐỘ TEST */
@@ -374,16 +377,15 @@ static void send_data_handler(struct k_work *work)
 
         LOG_DBG("[AUTO-SEND] Data Seq=%u -> 0x%04x", g_total_tx_count, dest_addr);
         
-        /* [RELATIVE TIMESTAMP] Gửi thời gian tương đối tính từ lúc bắt đầu test */
-        uint32_t timestamp = k_uptime_get_32() - (g_test_start_time > 0 ? g_test_start_time : k_uptime_get_32());
+        /* [REMOVED] Timestamp logic (Now handled by Ping-Pong RTT) */
 
         /* [FIX PDR > 100%] Đếm Tx ngay khi phát sinh gói tin 
          * thay vì đợi Callback gửi xong (tránh việc báo cáo xong mới cộng Tx).
          */
         pkt_stats_inc_data_tx(); 
         
-        /* [NEW] Khởi tạo Min RSSI = 0 (giá trị lớn nhất) cho gói tin gốc */
-        int err = bt_mesh_gradient_srv_data_send(&gradient_srv, dest_addr, g_total_tx_count, timestamp, 0);
+        /* [NEW] Khởi tạo Min RSSI = 0 (giá trị lớn nhất) cho gói tin gốc (Timestamp removed) */
+        int err = bt_mesh_gradient_srv_data_send(&gradient_srv, dest_addr, g_total_tx_count, 0);
         if (err) {
             LOG_WRN("Send failed (err %d)", err);
         } else {

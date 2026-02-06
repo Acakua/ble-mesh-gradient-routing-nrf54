@@ -1,0 +1,1 @@
+﻿Timestamp,Type,SourceAddr,SenderAddr,Seq_or_TxCount,HopCount,RTT_ms,PathMinRSSI,BeaconTx,HeartbeatTx,RouteChanges,FwdCount,Rx_Unique_Count,Remote_Rx_Count,PDR_Percent

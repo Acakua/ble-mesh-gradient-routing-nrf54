@@ -27,6 +27,14 @@ extern "C" {
 #endif
 
 /**
+ * @brief RTT Sample structure
+ */
+struct rtt_sample {
+    uint16_t seq;
+    uint16_t rtt_ms;
+};
+
+/**
  * @brief Packet statistics structure
  */
 struct packet_stats {
@@ -42,6 +50,32 @@ struct packet_stats {
  * @brief Initialize packet statistics (reset all counters to 0)
  */
 void pkt_stats_init(void);
+
+/**
+ * @brief Record that a DATA packet was sent (start RTT timer)
+ * @param seq Sequence number of the packet
+ */
+void pkt_stats_record_sent(uint16_t seq);
+
+/**
+ * @brief Record that a PONG was received (stop RTT timer and store)
+ * @param seq Sequence number of the packet
+ * @return True if buffer is full (50 samples reached)
+ */
+bool pkt_stats_record_pong(uint16_t seq);
+
+/**
+ * @brief Get RTT history history
+ * @param buffer Buffer to fill with RTT samples
+ * @param max_count Maximum number of samples to copy
+ * @return Actual number of samples copied
+ */
+uint16_t pkt_stats_get_rtt_history(struct rtt_sample *buffer, uint16_t max_count);
+
+/**
+ * @brief Clear RTT history after reporting
+ */
+void pkt_stats_clear_rtt_history(void);
 
 /**
  * @brief Increment Gradient Beacon TX counter

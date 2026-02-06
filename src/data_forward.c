@@ -11,6 +11,7 @@
 #include <zephyr/bluetooth/mesh.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 
 LOG_MODULE_REGISTER(data_forward, LOG_LEVEL_INF);
 
@@ -36,12 +37,10 @@ static uint16_t last_parent_addr = BT_MESH_ADDR_UNASSIGNED;
 static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
                               uint16_t addr, uint16_t original_source, 
                               uint16_t data, uint8_t hop_count,
-                              uint32_t timestamp, int8_t path_min_rssi);
+                              int8_t path_min_rssi);
 
 /**
  * @brief Find the BEST Parent strictly for Uplink Routing
- * * [CHANGED]: Removed 'static' keyword so gradient_srv.c can use this function
- * to route REPORT_RSP packets.
  * * Scans the entire table to find a neighbor with:
  * 1. Gradient < My Gradient (CRITICAL CONDITION)
  * 2. Best Gradient among valid candidates
@@ -123,7 +122,7 @@ static const struct bt_mesh_send_cb data_send_cb = {
 static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
                               uint16_t addr, uint16_t original_source, 
                               uint16_t data, uint8_t hop_count,
-                              uint32_t timestamp, int8_t path_min_rssi)
+                              int8_t path_min_rssi)
 {
     struct bt_mesh_msg_ctx ctx = {
         .addr = addr,
@@ -132,26 +131,21 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
         .send_rel = false, /* [OPTIMIZATION] Tắt Mesh ACK để chạy nhanh 1s/gói */
     };
 
-    /* [MODIFIED] Tăng kích thước buffer từ 9 lên 10 bytes (thêm 1 byte min_rssi) */
-    BT_MESH_MODEL_BUF_DEFINE(buf, BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE, 10);
+    /* [UPDATED] Size = 7 bytes */
+    BT_MESH_MODEL_BUF_DEFINE(buf, BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE, 7);
     bt_mesh_model_msg_init(&buf, BT_MESH_GRADIENT_SRV_OP_DATA_MESSAGE);
     
     net_buf_simple_add_le16(&buf, original_source);
     net_buf_simple_add_le16(&buf, data);
+    net_buf_simple_add_u8(&buf, 0); /* Reserved/TTL placeholder */
     net_buf_simple_add_u8(&buf, hop_count);
-    
-    /* [RELATIVE TIMstamp] Gửi thời gian tương đối tính từ lúc bắt đầu test */
-    if (timestamp == 0) {
-        extern uint32_t g_test_start_time;
-        timestamp = k_uptime_get_32() - (g_test_start_time > 0 ? g_test_start_time : k_uptime_get_32());
-    }
-    net_buf_simple_add_le32(&buf, timestamp);
-    
-    /* [NEW] Thêm giá trị RSSI thấp nhất trên đường truyền (1 byte) */
     net_buf_simple_add_u8(&buf, (uint8_t)path_min_rssi);
     
-    LOG_DBG("[TX] To 0x%04x: Src=0x%04x, Seq=%d, Hops=%d, TS=%u, MinRSSI=%d", 
-            addr, original_source, data, hop_count, timestamp, path_min_rssi);
+    /* [DIAGNOSTIC] Hex-dump outgoing DATA message */
+    LOG_HEXDUMP_INF(buf.data, buf.len, "DATA TX Payload:");
+
+    LOG_INF("[TX] To 0x%04x: Src=0x%04x, Seq=%d, Hops=%d, MinRSSI=%d", 
+            addr, original_source, data, hop_count, path_min_rssi);
     
     return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
                               &data_send_cb, 
@@ -176,7 +170,7 @@ void data_forward_init(void)
 int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t data, uint16_t original_source, 
                       uint16_t sender_addr, uint8_t hop_count_received,
-                      uint32_t timestamp, int8_t path_min_rssi)
+                      int8_t path_min_rssi)
 {
     /* FIX: Busy check */
     if (data_send_ctx.active) {
@@ -212,9 +206,9 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
     pkt_stats_inc_data_fwd();
     last_parent_addr = best_parent->addr;
     
-    /* Gửi đi với giá trị hop_count mới, timestamp gốc và min_rssi đã cập nhật */
+    /* Gửi đi với giá trị hop_count mới và min_rssi đã cập nhật (Timestamp removed) */
     int err = data_send_internal(gradient_srv, best_parent->addr, original_source, 
-                                 data, next_hop_count, timestamp, path_min_rssi);
+                                 data, next_hop_count, path_min_rssi);
 
     if (err) {
         data_send_ctx.active = false;
@@ -231,7 +225,7 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
  */
 int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
                              uint16_t addr, uint16_t data, 
-                             uint32_t timestamp, int8_t initial_rssi)
+                             int8_t initial_rssi)
 {
     uint16_t my_addr = bt_mesh_model_elem(gradient_srv->model)->rt->addr;
     
@@ -273,8 +267,8 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     }
     last_parent_addr = nexthop;
     
-    /* [MODIFIED] Khởi tạo RSSI thấp nhất bằng RSSI của link đầu tiên */
-    int err = data_send_internal(gradient_srv, nexthop, my_addr, data, initial_hop_count, timestamp, initial_rssi);
+    /* [MODIFIED] Khởi tạo RSSI thấp nhất bằng RSSI của link đầu tiên (Timestamp removed) */
+    int err = data_send_internal(gradient_srv, nexthop, my_addr, data, initial_hop_count, initial_rssi);
     
     if (err) {
         data_send_ctx.active = false;

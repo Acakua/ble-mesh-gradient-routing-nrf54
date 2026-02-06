@@ -1,0 +1,9 @@
+﻿Timestamp,Type,SourceAddr,SenderAddr,Seq_or_TxCount,HopCount,RTT_ms,PathMinRSSI,BeaconTx,HeartbeatTx,RouteChanges,FwdCount,Rx_Unique_Count,Remote_Rx_Count,PDR_Percent
+15:55:25.746,EVENT,TEST_START,Duration_ms=1200000,,,,,,,,,,,
+15:55:30.429,HEARTBEAT,0x0004,0x0004,,1,0,,,,,,,,
+15:55:50.445,HEARTBEAT,0x0004,0x0004,,1,0,,,,,,,,
+15:56:09.657,EVENT,TEST_STOP,Finished,,,,,,,,,,,
+15:56:11.770,REPORT,0x0002,,0,,,,2,2,2,0,0,0,0.00
+15:56:12.906,REPORT,0x0004,,0,,,,1,4,2,0,0,0,0.00
+15:56:13.523,REPORT,0x0005,,0,,,,1,0,0,0,0,0,0.00
+15:56:15.077,REPORT,0x0006,,0,,,,1,0,0,0,0,0,0.00

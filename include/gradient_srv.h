@@ -51,9 +51,13 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_DOWNLINK_REPORT BT_MESH_MODEL_OP_3(0x12, \
                         BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
-/* .. include_endpoint_gradient_srv_rst_1 */
+/* [NEW] PONG opcode (Downlink response to DATA) */
+#define BT_MESH_GRADIENT_SRV_OP_PONG BT_MESH_MODEL_OP_3(0x13, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
-/** Default TTL for BACKPROP packets */
+#define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE  1
+#define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE  64 /* Increased safety margin */
+#define BT_MESH_GRADIENT_SRV_DATA_MSG_LEN        7  /* Src(2)+Data(2)+TTL(1)+Hop(1)+MinRSSI(1) */
 #define BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL  10
 
 /** Minimum TTL to forward (drop if TTL <= this value) */
@@ -62,14 +66,12 @@ extern "C" {
 /** Heartbeat data marker - distinguishes heartbeat from real data */
 #define BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER      0xFFFF
 
-#define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE 1
-#define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE 20 /* Ensure enough for DATA+TS (9 bytes) */
 
 #define REPORT_RETRY_TIMEOUT_MS 3000 // Tăng thời gian chờ cơ bản
 #define REPORT_MAX_RETRIES      10   // Tăng số lần thử lại tối đa
 
 #ifndef CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS
-#define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS 30000  // 30 giây
+#define CONFIG_BT_MESH_GRADIENT_SRV_NODE_TIMEOUT_MS 120000  // 120 giây (Publish every 40s)
 #endif
 
 /**
@@ -190,7 +192,6 @@ int bt_mesh_gradient_srv_gradient_send(struct bt_mesh_gradient_srv *gradient_srv
 int bt_mesh_gradient_srv_data_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t addr,
                       uint16_t data,
-                      uint32_t timestamp,
                       int8_t initial_rssi);
 
 /** @brief Send BACKPROP_DATA to a specific destination.
@@ -258,6 +259,16 @@ int bt_mesh_gradient_srv_report_rsp_send(struct bt_mesh_gradient_srv *gradient_s
  */
 int bt_mesh_gradient_srv_send_downlink_report(struct bt_mesh_gradient_srv *gradient_srv, 
                                               uint16_t dest_addr, uint16_t total_tx);
+
+/**
+ * @brief Send a PONG response to a DATA message (used by Sink)
+ * @param gradient_srv Pointer to gradient server
+ * @param dest_addr Original source of the DATA message
+ * @param seq Sequence number to match
+ * @return 0 on success, error code otherwise
+ */
+int bt_mesh_gradient_srv_send_pong(struct bt_mesh_gradient_srv *gradient_srv, 
+                                   uint16_t dest_addr, uint16_t seq);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

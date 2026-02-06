@@ -1,3 +1,0 @@
-﻿Timestamp,Type,SourceAddr,SenderAddr,Seq_or_TxCount,HopCount,Latency_ms,PathMinRSSI,BeaconTx,HeartbeatTx,RouteChanges,FwdCount,Rx_Unique_Count,PDR_Percent
-19:36:32.080,REPORT,0x0018,,119,,,,13,8,8,0,0,0.00
-19:36:33.238,REPORT,0x001e,,118,,,,13,6,10,33,0,0.00
