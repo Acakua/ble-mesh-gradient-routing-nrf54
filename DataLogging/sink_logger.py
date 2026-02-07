@@ -168,10 +168,13 @@ def main():
                                 if len(parts) >= 7:
                                     src_hex = f"0x{safe_int_convert(parts[1]):04x}"
 
-                                    if src_hex in reported_nodes:
+                                    # [FIXED] Cho phép nhận nhiều Report từ cùng một Node (Intermediate Reports)
+                                    # Lọc trùng bằng tổ hợp (Địa chỉ, Số gói Tx) để tránh ghi lại các bản tin Retry.
+                                    report_key = (src_hex, parts[2])
+                                    if report_key in reported_nodes:
                                         continue
                                     
-                                    reported_nodes.add(src_hex)
+                                    reported_nodes.add(report_key)
                                     data_tx = safe_int_convert(parts[2])
                                     measured_rx = len(rx_stats.get(src_hex, set()))
                                     pdr = (measured_rx / data_tx * 100.0) if data_tx > 0 else 0.0

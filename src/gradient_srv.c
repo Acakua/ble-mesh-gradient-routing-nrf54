@@ -499,9 +499,14 @@ static void report_retry_handler(struct k_work *work)
 
     if (!srv->is_report_pending) return;
 
+    /* [FIX] Reset count và giải phóng khóa khi đã thử đủ số lần mà không thành công */
     if (srv->report_retry_count >= REPORT_MAX_RETRIES) {
         LOG_ERR("Max retries for REPORT reached. Giving up.");
         srv->is_report_pending = false;
+        srv->report_retry_count = 0; // Reset để chu kỳ sau bắt đầu lại từ đầu
+        
+        /* [FIX] Clear RTT buffer to allow future triggers */
+        pkt_stats_clear_rtt_history();
         return;
     }
 
@@ -537,28 +542,20 @@ static void report_retry_handler(struct k_work *work)
         net_buf_simple_add_le16(&msg, rtt_history[i].rtt_ms);
     }
 
-    /* [DYNAMIC PARENT SWITCHING] 
-     * Thay đổi Parent dựa trên số lần Retry để tránh bị kẹt tại một Relay chết.
-     */
+    /* [DYNAMIC PARENT SWITCHING] - GIỮ NGUYÊN */
     uint16_t target_parent = BT_MESH_ADDR_UNASSIGNED;
     int parent_idx = 0;
 
-    // Retry 0-2: Dùng Best Parent (Index 0)
-    // Retry 3-5: Dùng 2nd Best Parent (Index 1) nếu có
-    // Retry 6+:  Quét tìm bất kỳ Parent nào khả thi
     if (srv->report_retry_count >= 6) {
-        // Fallback mode: Tìm bất kỳ ai là Parent
         for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
             if (srv->forwarding_table[i].gradient < srv->gradient &&
                 srv->forwarding_table[i].addr != BT_MESH_ADDR_UNASSIGNED) {
                 target_parent = srv->forwarding_table[i].addr;
                 parent_idx = i;
-                // Ưu tiên đổi khác cái cũ một chút bằng cách lấy modulo
                 if (i >= (srv->report_retry_count % 3)) break; 
             }
         }
     } else if (srv->report_retry_count >= 3) {
-        // Try 2nd best parent
         if (srv->forwarding_table[1].gradient < srv->gradient && 
             srv->forwarding_table[1].addr != BT_MESH_ADDR_UNASSIGNED) {
             target_parent = srv->forwarding_table[1].addr;
@@ -566,7 +563,6 @@ static void report_retry_handler(struct k_work *work)
         }
     }
 
-    // Nếu không tìm được candidate nào khác, quay về Best Parent
     if (target_parent == BT_MESH_ADDR_UNASSIGNED) {
         target_parent = srv->forwarding_table[0].addr;
         parent_idx = 0;
@@ -576,20 +572,28 @@ static void report_retry_handler(struct k_work *work)
         .app_idx = srv->model->keys[0],
         .addr = target_parent,
         .send_ttl = BT_MESH_TTL_DEFAULT,
-        .send_rel = true, // BẮT BUỘC có ACK
+        .send_rel = true, 
     };
     
     if (target_parent != BT_MESH_ADDR_UNASSIGNED) {
         LOG_WRN("Resending REPORT_RSP (Retry %u) to Parent [%d]: 0x%04x", 
                 srv->report_retry_count, parent_idx, target_parent);
-        bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+        
+        /* [UPDATED] Gửi Report đi nhưng KHÔNG dừng retry ngay lập tức.
+         * Chỉ dừng khi nhận được REPORT_ACK từ Sink (xử lý ở handle_report_ack).
+         */
+        int err = bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+        if (err) {
+            LOG_ERR("Retry %u: Send failed (err %d)", srv->report_retry_count, err);
+        }
     } else {
         LOG_ERR("Retry %u: No parent to send report!", srv->report_retry_count);
     }
-
-    // Schedule next retry with Jitter
+ 
+    /* Scheduler Retry tiếp theo (để đảm bảo tin cậy) */
     uint32_t jitter = sys_rand32_get() % 1000;
-    k_work_schedule(&srv->report_retry_work, K_MSEC(REPORT_RETRY_TIMEOUT_MS + jitter));
+    /* [FIX] Tăng thời gian chờ retry lên 4-5s để tránh nghẽn mạng */
+    k_work_schedule(&srv->report_retry_work, K_MSEC(4000 + jitter));
 }
 
 static int handle_report_ack(const struct bt_mesh_model *model,
