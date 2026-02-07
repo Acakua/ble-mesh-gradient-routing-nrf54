@@ -280,12 +280,12 @@ static void gradient_process_handler(struct k_work *work)
         /* Sink logic: Do nothing */
 #else
         /* Regular node logic */
-        if (rp_should_update_my_gradient(gradient_srv->gradient, best->gradient)) {
-            uint8_t old_gradient = gradient_srv->gradient;
-            uint8_t new_gradient = rp_compute_new_gradient(best->gradient);
-            
-            if (new_gradient == 0) new_gradient = 1;
-            
+        uint8_t old_gradient = gradient_srv->gradient;
+        uint8_t new_gradient = rp_compute_new_gradient(best->gradient);
+        
+        if (new_gradient == 0) new_gradient = 1;
+
+        if (rp_should_update_my_gradient(old_gradient, best->gradient)) {
             gradient_srv->gradient = new_gradient;
             
             LOG_INF("[Process] Gradient updated: [%d] -> [%d] (Parent: 0x%04x)", 

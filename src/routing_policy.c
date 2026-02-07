@@ -72,15 +72,14 @@ uint8_t rp_compute_new_gradient(uint8_t best_parent_grad)
 bool rp_should_update_my_gradient(uint8_t my_grad, uint8_t best_parent_grad)
 {
 	/* 
-	 * CHANGED: We should update if our gradient is NOT EQUAL to (best_parent + 1).
-	 * This handles:
-	 * 1. Fast Descent: (my_grad > best_parent + 1) -> Found a better shortcut.
-	 * 2. Graceful Retreat: (my_grad < best_parent + 1) -> Best parent moved further away.
+	 * REVERTED: Only update if our gradient is GREATER than (best_parent + 1).
+	 * This ensures we only converge towards the Sink and never increase 
+     * our gradient unless the node is reset or cleaned up.
 	 */
 	if (best_parent_grad == UINT8_MAX) {
 		return false;
 	}
 
 	uint8_t target_grad = rp_compute_new_gradient(best_parent_grad);
-	return (my_grad != target_grad);
+	return (my_grad > target_grad);
 }
