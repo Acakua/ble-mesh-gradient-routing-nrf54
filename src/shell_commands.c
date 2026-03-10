@@ -646,6 +646,41 @@ SHELL_STATIC_SUBCMD_SET_CREATE(stats_subcmds,
 );
 
 /*============================================================================*/
+/*                         Command: mesh topo_req                             */
+/*============================================================================*/
+
+/**
+ * @brief Yêu cầu tất cả Sensor gửi báo cáo Topology
+ *
+ * Lệnh: mesh topo_req
+ *
+ * Phát Broadcast OP_TOPO_REQ ra toàn mạng lưới.
+ * Các Sensor Node sẽ trả lời với OP_TOPO_REP sau một khoảng Jitter ngẫu nhiên.
+ */
+static int cmd_mesh_topo_req(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!check_provisioned(sh)) {
+        return -ENOEXEC;
+    }
+
+    if (gradient_srv.gradient != 0) {
+        shell_error(sh, "Chi Sink (gradient=0) moi co the gui TOPO_REQ!");
+        return -ENOEXEC;
+    }
+
+    int err = bt_mesh_gradient_srv_send_topo_req(&gradient_srv);
+    if (!err) {
+        shell_print(sh, "Da phat Broadcast TOPO_REQ! Cho 8-10 giay...");
+    } else {
+        shell_error(sh, "Gui that bai, err=%d", err);
+    }
+    return err;
+}
+
+/*============================================================================*/
 /*                         Shell Command Registration                         */
 /*============================================================================*/
 
@@ -698,6 +733,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(mesh_cmds,
         "Thong ke goi tin TX (mesh stats | mesh stats reset)",
         cmd_mesh_stats_show),
 
+    SHELL_CMD_ARG(topo_req, NULL,
+        "Yeu cau Sensor bao cao Topology: mesh topo_req",
+        cmd_mesh_topo_req, 1, 0),
+
     SHELL_SUBCMD_SET_END
 );
 
@@ -713,5 +752,6 @@ SHELL_CMD_REGISTER(mesh, &mesh_cmds,
     "  mesh backprop  - Gui BACKPROP (Gateway)\n"
     "  mesh data      - Gui DATA (Node)\n"
     "  mesh heartbeat - Trang thai heartbeat\n"
-    "  mesh stats     - Thong ke goi tin TX",
+    "  mesh stats     - Thong ke goi tin TX\n"
+    "  mesh topo_req  - Quet Topology toan mang",
     NULL);

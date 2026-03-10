@@ -252,6 +252,9 @@ const struct bt_mesh_comp *model_handler_init(void)
     k_work_init_delayable(&stress_tx_work, stress_tx_handler);
     k_work_init_delayable(&stress_timeout_work, stress_timeout_handler);
 
+    /* [NEW] Topology Reporting Init */
+    topo_routing_init(&gradient_srv);
+
 #ifdef CONFIG_BT_MESH_GRADIENT_SINK_NODE
     gradient_srv.gradient = 0;
     LOG_INF("Initialized as SINK node (gradient = 0)\n");
@@ -259,6 +262,12 @@ const struct bt_mesh_comp *model_handler_init(void)
     gradient_srv.gradient = UINT8_MAX;
     LOG_INF("Initialized as regular node (gradient = 255)\n");
 #endif
+
+    /* [IMPORTANT] Topology polling depends on gradient being set first */
+    if (gradient_srv.gradient == 0) {
+        k_work_schedule(&gradient_srv.topo_poll_work,
+                        K_SECONDS(CONFIG_BT_MESH_TOPO_POLL_INTERVAL));
+    }
 
     dk_buttons_init(button_handler);
     return &comp;

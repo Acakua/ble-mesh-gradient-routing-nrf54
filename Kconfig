@@ -99,6 +99,16 @@ config BT_MESH_GRADIENT_SRV_RRT_MAX_DEST
       
       Impact: Higher values consume more heap memory (approx 16 bytes per entry).
 
+config BT_MESH_TOPO_POLL_INTERVAL
+    int "Topology polling interval in seconds (Sink broadcasts OP_TOPO_REQ)"
+    default 30
+    range 10 120
+    help
+      How often the Sink node broadcasts a topology request to all nodes.
+      Each sensor will respond with its neighborhood snapshot after a
+      random jitter delay (0-8s). Lower values give fresher data for ML
+      but increase network overhead.
+
 endmenu
 
 module = bt_mesh_gradient_srv

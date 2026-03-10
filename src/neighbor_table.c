@@ -8,8 +8,12 @@
 #include <limits.h>
 #include <string.h>
 #include <zephyr/logging/log.h>
+#include "gradient_srv.h"
 
 LOG_MODULE_REGISTER(neighbor_table, LOG_LEVEL_INF);
+
+/* External reference for Delta Topology Trigger */
+extern struct bt_mesh_gradient_srv gradient_srv;
 
 void nt_init(neighbor_entry_t *table, size_t table_size)
 {
@@ -133,6 +137,13 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
         table[insert_pos].rssi = sender_rssi;
         table[insert_pos].last_seen = now_ms;
         // backprop_dest đã được xử lý ở bước 3
+    }
+
+    /* [NEW] Delta Topology Trigger: Detect best-parent change */
+    if (table[0].addr != gradient_srv.topo_ctx.last_reported_parent &&
+        gradient_srv.gradient != 0 && gradient_srv.gradient != UINT8_MAX) {
+        gradient_srv.topo_ctx.last_reported_parent = table[0].addr;
+        bt_mesh_gradient_srv_trigger_delta_topo(&gradient_srv);
     }
 
     return true;
