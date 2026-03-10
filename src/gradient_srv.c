@@ -997,8 +997,9 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
      * Format:
      * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,[neighbors]
      * ═══════════════════════════════════════════════════════ */
-    printk("$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", origin_addr, seq_id, total_pages,
-           current_page, count, grad, parent);
+    char uart_buf[200];
+    int pos = snprintf(uart_buf, sizeof(uart_buf), "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", 
+                       origin_addr, seq_id, total_pages, current_page, count, grad, parent);
 
     for (int i = 0; i < count; i++) {
       /* Bounds checking before each pull */
@@ -1009,9 +1010,11 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
       int8_t n_rssi = (int8_t)net_buf_simple_pull_u8(buf);
       uint8_t n_grad = net_buf_simple_pull_u8(buf);
 
-      printk(",[%04X,%d,%d]", n_addr, n_rssi, n_grad);
+      if (pos < sizeof(uart_buf)) {
+        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%04X,%d,%d]", n_addr, n_rssi, n_grad);
+      }
     }
-    printk("\n"); /* EOF */
+    printk("%s\n", uart_buf); /* Atomic print to avoid shell prompt interleaving */
 
     LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, parent=0x%04X, "
             "via 0x%04X)",
