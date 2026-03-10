@@ -994,10 +994,11 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
   if (srv->gradient == 0) {
     /* ═══════════════════════════════════════════════════════
      * I AM SINK: Parse and print to UART with SOF/EOF
-     * Format: $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,[neighbors]
+     * Format:
+     * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,[neighbors]
      * ═══════════════════════════════════════════════════════ */
-    printk("$[TOPO],%04X,%d,%d,%d,%d", origin_addr, seq_id, total_pages,
-           current_page, count);
+    printk("$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", origin_addr, seq_id, total_pages,
+           current_page, count, grad, parent);
 
     for (int i = 0; i < count; i++) {
       /* Bounds checking before each pull */
@@ -1012,8 +1013,10 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     }
     printk("\n"); /* EOF */
 
-    LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, via 0x%04X)",
-            current_page, total_pages, origin_addr, seq_id, ctx->addr);
+    LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, parent=0x%04X, "
+            "via 0x%04X)",
+            current_page, total_pages, origin_addr, seq_id, grad, parent,
+            ctx->addr);
   } else {
     /* ═══════════════════════════════════════════════════════
      * I AM RELAY: Forward entire payload to my best parent
