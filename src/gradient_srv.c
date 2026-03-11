@@ -104,6 +104,38 @@ static int handle_gradient_message(const struct bt_mesh_model *model,
                                    struct bt_mesh_msg_ctx *ctx,
                                    struct net_buf_simple *buf);
 
+static void rrt_update_from_uplink_msg(struct bt_mesh_gradient_srv *srv,
+                                       uint16_t sender_addr,
+                                       uint16_t original_source, int8_t rssi,
+                                       int64_t now) {
+  k_mutex_lock(&srv->forwarding_table_mutex, K_FOREVER);
+
+  /* 1. Update/Add Neighbor Table (Robust Discovery)
+   * Even if we missed the Gradient Beacon, we accept the node into the table
+   * based on Uplink traffic (DATA/Heartbeat/TOPO) to ensure RRT learning.
+   */
+  uint8_t sender_gradient = UINT8_MAX;
+  for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+    if (srv->forwarding_table[i].addr == sender_addr) {
+      sender_gradient = srv->forwarding_table[i].gradient;
+      break;
+    }
+  }
+
+  nt_update_sorted((neighbor_entry_t *)srv->forwarding_table,
+                   CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+                   sender_addr, sender_gradient, rssi, now);
+
+  /* 2. Reverse Route Learning (RRT) */
+  rrt_add_dest(srv->forwarding_table,
+               CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+               sender_addr,     /* nexthop */
+               original_source, /* destination */
+               now);
+
+  k_mutex_unlock(&srv->forwarding_table_mutex);
+}
+
 static int handle_data_message(const struct bt_mesh_model *model,
                                struct bt_mesh_msg_ctx *ctx,
                                struct net_buf_simple *buf) {
@@ -145,32 +177,9 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
   int64_t now = k_uptime_get();
 
-  k_mutex_lock(&gradient_srv->forwarding_table_mutex, K_FOREVER);
-
-  /* 1. Update/Add Neighbor Table (Robust Discovery)
-   * Even if we missed the Gradient Beacon, we accept the node into the table
-   * based on DATA/Heartbeat to ensure RRT learning.
-   */
-  uint8_t sender_gradient = UINT8_MAX;
-  for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
-    if (gradient_srv->forwarding_table[i].addr == sender_addr) {
-      sender_gradient = gradient_srv->forwarding_table[i].gradient;
-      break;
-    }
-  }
-
-  nt_update_sorted((neighbor_entry_t *)gradient_srv->forwarding_table,
-                   CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-                   sender_addr, sender_gradient, rssi, now);
-
-  /* 2. Reverse Route Learning (RRT) */
-  rrt_add_dest(gradient_srv->forwarding_table,
-               CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
-               sender_addr,     /* nexthop */
-               original_source, /* destination */
-               now);
-
-  k_mutex_unlock(&gradient_srv->forwarding_table_mutex);
+  /* [ROBUST RRT] Update/Add RRT route for ANY Uplink message (Data/Heartbeat) */
+  rrt_update_from_uplink_msg(gradient_srv, sender_addr, original_source, rssi,
+                             now);
 
   /* ════════════════════════════════════════════════════════════════════
    * Forwarding Logic & LOGGING
@@ -280,7 +289,6 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
               "%d, Delay: %u ms",
               payload, hop_count, delay_ms);
       pkt_stats_inc_rx();
-      led_indicate_backprop_received();
       if (gradient_srv->handlers->data_received) {
         gradient_srv->handlers->data_received(gradient_srv, payload);
       }
@@ -317,6 +325,7 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
       .app_idx = gradient_srv->model->keys[0],
       .addr = nexthop,
       .send_ttl = 0,
+      .send_rel = true, /* [FIX] Reliable delivery for Backprop */
   };
 
   bt_mesh_model_send(gradient_srv->model, &tx_ctx, &msg, NULL, NULL);
@@ -672,6 +681,12 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
 
   struct bt_mesh_gradient_srv *srv = model->rt->user_data;
 
+  /* [ROBUST RRT] Update RRT for Report Response for ALL nodes (Sink & Relays)
+   * This ensures the node forwarding this packet also learns the uplink route. 
+   */
+  rrt_update_from_uplink_msg(srv, ctx->addr, reporter_addr, ctx->recv_rssi,
+                             k_uptime_get());
+
   /* [LOGIC PHÂN NHÁNH: SINK vs RELAY] */
   if (srv->gradient == 0) {
     /* [1. I AM SINK] - Log dữ liệu và gửi ACK về nguồn gốc thực sự */
@@ -991,6 +1006,12 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     count = TOPO_REP_MAX_PER_PAGE; /* Safety clamp */
   }
 
+  /* [ROBUST RRT] Update RRT for Topology Reports for ALL nodes (Sink & Relays)
+   * This ensures intermediate nodes learn the path back to the origin.
+   */
+  rrt_update_from_uplink_msg(srv, ctx->addr, origin_addr, ctx->recv_rssi,
+                             k_uptime_get());
+
   if (srv->gradient == 0) {
     /* ═══════════════════════════════════════════════════════
      * I AM SINK: Parse and print to UART with SOF/EOF
@@ -998,8 +1019,9 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
      * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,[neighbors]
      * ═══════════════════════════════════════════════════════ */
     char uart_buf[200];
-    int pos = snprintf(uart_buf, sizeof(uart_buf), "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", 
-                       origin_addr, seq_id, total_pages, current_page, count, grad, parent);
+    int pos = snprintf(uart_buf, sizeof(uart_buf),
+                       "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", origin_addr, seq_id,
+                       total_pages, current_page, count, grad, parent);
 
     for (int i = 0; i < count; i++) {
       /* Bounds checking before each pull */
@@ -1011,10 +1033,12 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
       uint8_t n_grad = net_buf_simple_pull_u8(buf);
 
       if (pos < sizeof(uart_buf)) {
-        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%04X,%d,%d]", n_addr, n_rssi, n_grad);
+        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%04X,%d,%d]",
+                        n_addr, n_rssi, n_grad);
       }
     }
-    printk("%s\n", uart_buf); /* Atomic print to avoid shell prompt interleaving */
+    printk("%s\n",
+           uart_buf); /* Atomic print to avoid shell prompt interleaving */
 
     LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, parent=0x%04X, "
             "via 0x%04X)",
@@ -1440,6 +1464,7 @@ int bt_mesh_gradient_srv_backprop_send(
       .app_idx = gradient_srv->model->keys[0],
       .addr = nexthop,
       .send_ttl = 0,
+      .send_rel = true, /* [FIX] Reliable delivery for Backprop */
   };
 
   return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);

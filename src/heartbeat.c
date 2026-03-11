@@ -107,7 +107,7 @@ static void heartbeat_work_handler(struct k_work *work)
     /* Don't send if gradient is uninitialized */
     if (current_gradient == UINT8_MAX) {
         LOG_DBG("[Heartbeat] Gradient not yet set, skipping");
-        k_work_reschedule(&heartbeat_work, K_SECONDS(HB_INTERVAL_FAST));
+        k_work_reschedule(&heartbeat_work, K_SECONDS(20)); /* Fixed 20s */
         return;
     }
     
@@ -127,7 +127,7 @@ static void heartbeat_work_handler(struct k_work *work)
         /* SUCCESS: Increment heartbeat counter */
         pkt_stats_inc_heartbeat();
         
-        /* Transition towards Maintenance State */
+        /* [FIXED INTERVAL] Transition towards Maintenance State - COMMENTED OUT
         switch (current_hb_state) {
             case HB_STATE_FAST:
                 LOG_DBG("[Heartbeat] FAST -> MEDIUM");
@@ -145,19 +145,28 @@ static void heartbeat_work_handler(struct k_work *work)
                 LOG_DBG("[Heartbeat] Keeping MAINTENANCE state");
                 break;
         }
+        */
     } else {
-        /* FAILURE: Reset to FAST state to recover connectivity */
+        /* [FIXED INTERVAL] FAILURE: Reset to FAST state to recover connectivity - COMMENTED OUT
         if (current_hb_state != HB_STATE_FAST) {
             LOG_WRN("[Heartbeat] TX Failed (err %d), resetting to FAST state", err);
             current_hb_state = HB_STATE_FAST;
         } else {
             LOG_ERR("[Heartbeat] TX Failed (err %d) in FAST state", err);
         }
+        */
+        LOG_ERR("[Heartbeat] TX Failed (err %d)", err);
     }
     
-    /* Reschedule based on new state */
-    uint32_t next_interval = get_current_interval_sec();
-    k_work_reschedule(&heartbeat_work, K_SECONDS(next_interval));
+    /* [FIXED INTERVAL + JITTER] 
+     * Base interval is 20 seconds. We add 0 to ~5 seconds of random jitter 
+     * to prevent all nodes in the mesh from sending their heartbeats 
+     * at the exact same millisecond and causing MAC collisions.
+     */
+    uint32_t base_jitter_ms = 20000;
+    uint32_t extra_jitter_ms = sys_rand32_get() % 5000; 
+    
+    k_work_reschedule(&heartbeat_work, K_MSEC(base_jitter_ms + extra_jitter_ms));
 #endif
 }
 
@@ -270,14 +279,11 @@ void heartbeat_trigger_reset(void)
         return;
     }
 
-    /* Only reset if not already in FAST state to avoid unnecessary spam */
-    if (current_hb_state != HB_STATE_FAST) {
-        LOG_INF("[Heartbeat] Triggered RESET to FAST state");
-        current_hb_state = HB_STATE_FAST;
-        
-        /* Schedule immediate run (small delay to avoid race conditions) */
-        k_work_reschedule(&heartbeat_work, K_MSEC(100));
-    }
+    /* [FIXED INTERVAL] Simplified reset - Always reschedule with small delay 
+     * when a topology change is detected to maintain 10s rhythm from new state.
+     */
+    LOG_INF("[Heartbeat] Triggered RESET (Toplogy Change)");
+    k_work_reschedule(&heartbeat_work, K_MSEC(100));
 #endif
 }
 

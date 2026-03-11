@@ -86,7 +86,23 @@ const neighbor_entry_t *find_strict_upstream_parent(
             }
             /* Tie-break with RSSI */
             else if (entry->gradient == best_candidate->gradient) {
-                if (entry->rssi > best_candidate->rssi) {
+                // [HYSTERESIS STABILITY FIX]
+                int rssi_diff = entry->rssi - best_candidate->rssi;
+                
+                // If the entry we are evaluating is our last chosen parent, it gets a 5dBm "bonus"
+                if (entry->addr == last_parent_addr && (best_candidate->addr != last_parent_addr)) {
+                    if (rssi_diff > -5) { // Keeps the current parent even if new is slightly better
+                        best_candidate = entry;
+                    }
+                } 
+                // If the entry we are evaluating is NOT our last favored parent
+                else if (best_candidate->addr == last_parent_addr && (entry->addr != last_parent_addr)) {
+                    if (rssi_diff > 5) { // Needs to be significantly better to dethrone the current parent
+                        best_candidate = entry;
+                    }
+                } 
+                // Normal comparison
+                else if (entry->rssi > best_candidate->rssi) {
                     best_candidate = entry;
                 }
             }
@@ -110,8 +126,8 @@ static void data_send_end_cb(int err, void *user_data)
         LOG_INF("[TX Complete] SUCCESS sent to 0x%04x", dest_addr);
     }
     
-    /* Always clear active flag */
-    ctx->active = false;
+    /* Always clear active flag (REMOVED: handled by Zephyr queue) */
+    // ctx->active = false;
 }
 
 static const struct bt_mesh_send_cb data_send_cb = {
@@ -155,7 +171,7 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
 /* Handler Unused in Strict Mode but kept for compilation compatibility */
 static void data_retry_handler(struct k_work *work)
 {
-    data_send_ctx.active = false;
+    // data_send_ctx.active = false;
 }
 
 void data_forward_init(void)
@@ -172,11 +188,13 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
                       uint16_t sender_addr, uint8_t hop_count_received,
                       int8_t path_min_rssi)
 {
-    /* FIX: Busy check */
-    if (data_send_ctx.active) {
-        LOG_WRN("[Forward] System busy, dropping packet %d", data);
-        return -EBUSY;
-    }
+    /* [REMOVED] Busy check 
+     * We now rely on Zephyr's internal TX segments queue to buffer packets.
+     */
+    // if (data_send_ctx.active) {
+    //     LOG_WRN("[Forward] System busy, dropping packet %d", data);
+    //     return -EBUSY;
+    // }
 
     /* Logic: Tìm cha tốt nhất theo hướng Uplink (về Sink) */
     const neighbor_entry_t *best_parent = find_strict_upstream_parent(gradient_srv, sender_addr);
@@ -196,7 +214,7 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
     data_send_ctx.data = data;
     data_send_ctx.original_source = original_source;
     data_send_ctx.target_addr = best_parent->addr;
-    data_send_ctx.active = true;
+    // data_send_ctx.active = true;
     
     LOG_INF("[Forward] Relay via 0x%04x (Grad: %d) Seq: %d, Hops: %d -> %d", 
             best_parent->addr, best_parent->gradient, data, 
@@ -211,7 +229,7 @@ int data_forward_send(struct bt_mesh_gradient_srv *gradient_srv,
                                  data, next_hop_count, path_min_rssi);
 
     if (err) {
-        data_send_ctx.active = false;
+        // data_send_ctx.active = false;
         LOG_ERR("[Forward] TX failed start, err=%d", err);
         return err;
     }
@@ -229,11 +247,13 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
 {
     uint16_t my_addr = bt_mesh_model_elem(gradient_srv->model)->rt->addr;
     
-    /* FIX: Busy check */
-    if (data_send_ctx.active) {
-        LOG_WRN("[Direct] System busy, dropping packet %d", data);
-        return -EBUSY;
-    }
+    /* [REMOVED] Busy check 
+     * Direct sends also queue up in the Zephyr buffer.
+     */
+    // if (data_send_ctx.active) {
+    //     LOG_WRN("[Direct] System busy, dropping packet %d", data);
+    //     return -EBUSY;
+    // }
 
     /* FIX: Even for direct send (Heartbeat/Data), strictly use Upstream Parent */
     /* Ignore 'addr' parameter as this is for Uplink Data */
@@ -254,7 +274,7 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     data_send_ctx.data = data;
     data_send_ctx.original_source = my_addr;
     data_send_ctx.target_addr = nexthop;
-    data_send_ctx.active = true;
+    // data_send_ctx.active = true;
     
     LOG_INF("[Direct] Sending Seq: %d to PARENT 0x%04x (Hops: 1)", 
             data, nexthop);
@@ -271,7 +291,7 @@ int data_forward_send_direct(struct bt_mesh_gradient_srv *gradient_srv,
     int err = data_send_internal(gradient_srv, nexthop, my_addr, data, initial_hop_count, initial_rssi);
     
     if (err) {
-        data_send_ctx.active = false;
+        // data_send_ctx.active = false;
         LOG_ERR("[Direct] TX failed start, err=%d", err);
         return err;
     }

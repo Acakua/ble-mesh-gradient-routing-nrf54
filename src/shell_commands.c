@@ -361,9 +361,9 @@ static int cmd_mesh_backprop(const struct shell *sh, size_t argc, char **argv) {
     return -ENOEXEC;
   }
 
-  /* Parse địa chỉ đích */
+  /* Parse địa chỉ đích (hexa) */
   char *endptr;
-  unsigned long dest_addr = strtoul(argv[1], &endptr, 0);
+  unsigned long dest_addr = strtoul(argv[1], &endptr, 16);
   if (*endptr != '\0' || dest_addr > 0xFFFF) {
     shell_error(sh, "Dia chi khong hop le: %s", argv[1]);
     return -EINVAL;
@@ -551,9 +551,9 @@ static int cmd_mesh_stress_dl(const struct shell *sh, size_t argc,
     return -EINVAL;
   }
 
+  /* Parse địa chỉ (luôn mặc định là hexa, vd: 000A) */
   char *endptr;
-  unsigned long addr = strtoul(argv[1], &endptr, 0); // Auto detect hex/dec
-
+  unsigned long addr = strtoul(argv[1], &endptr, 16);
   if (*endptr != '\0' || addr > 0xFFFF) {
     shell_error(sh, "Dia chi khong hop le: %s", argv[1]);
     return -EINVAL;
@@ -706,9 +706,9 @@ static int cmd_mesh_attention(const struct shell *sh, size_t argc, char **argv) 
     return -ENOEXEC;
   }
 
-  /* Parse địa chỉ đích */
+  /* Parse địa chỉ đích (luôn mặc định hexa) */
   char *endptr;
-  unsigned long dest_addr = strtoul(argv[1], &endptr, 0);
+  unsigned long dest_addr = strtoul(argv[1], &endptr, 16);
   if (*endptr != '\0' || dest_addr > 0xFFFF) {
     shell_error(sh, "Dia chi khong hop le: %s", argv[1]);
     return -EINVAL;
