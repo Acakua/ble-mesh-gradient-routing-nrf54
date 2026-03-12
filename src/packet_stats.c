@@ -35,8 +35,6 @@ static atomic_t data_tx_count = ATOMIC_INIT(0);
 static atomic_t data_fwd_count = ATOMIC_INIT(0);
 static atomic_t route_change_count = ATOMIC_INIT(0);
 static atomic_t rx_data_count = ATOMIC_INIT(0); /* [NEW] */
-static atomic_t queue_drop_count = ATOMIC_INIT(0); /* [NEW] */
-static atomic_t topo_fwd_count = ATOMIC_INIT(0);   /* [NEW] For TOPO_REP window */
 static bool stats_enabled = false;
 
 /* [NEW] RTT Tracking Data */
@@ -57,8 +55,6 @@ void pkt_stats_init(void)
     atomic_set(&data_fwd_count, 0);
     atomic_set(&route_change_count, 0);
     atomic_set(&rx_data_count, 0); /* [NEW] */
-    atomic_set(&queue_drop_count, 0);
-    atomic_set(&topo_fwd_count, 0);
     
     k_mutex_lock(&stats_mutex, K_FOREVER);
     for (int i = 0; i < MAX_PENDING_PONGS; i++) {
@@ -185,26 +181,18 @@ void pkt_stats_inc_data_tx(void)
 {
     if (!stats_enabled) return;
     atomic_inc(&data_tx_count);
-    atomic_inc(&topo_fwd_count);
 }
 
 void pkt_stats_inc_data_fwd(void)
 {
     if (!stats_enabled) return;
     atomic_inc(&data_fwd_count);
-    atomic_inc(&topo_fwd_count);
 }
 
 void pkt_stats_inc_route_change(void)
 {
     if (!stats_enabled) return;
     atomic_inc(&route_change_count);
-}
-
-void pkt_stats_inc_queue_drop(void)
-{
-    if (!stats_enabled) return;
-    atomic_inc(&queue_drop_count);
 }
 
 void pkt_stats_inc_rx(void)
@@ -225,7 +213,6 @@ void pkt_stats_get(struct packet_stats *stats)
     stats->data_fwd_tx = (uint32_t)atomic_get(&data_fwd_count);
     stats->route_change_count = (uint32_t)atomic_get(&route_change_count);
     stats->rx_data_count = (uint32_t)atomic_get(&rx_data_count); /* [NEW] */
-    stats->queue_drop_count = (uint32_t)atomic_get(&queue_drop_count);
 }
 
 uint32_t pkt_stats_get_gradient_beacon(void)
@@ -253,11 +240,6 @@ uint32_t pkt_stats_get_route_change(void)
     return (uint32_t)atomic_get(&route_change_count);
 }
 
-uint32_t pkt_stats_get_queue_drop(void)
-{
-    return (uint32_t)atomic_get(&queue_drop_count);
-}
-
 uint32_t pkt_stats_get_rx(void)
 {
     return (uint32_t)atomic_get(&rx_data_count);
@@ -268,16 +250,6 @@ uint32_t pkt_stats_get_control_total(void)
     return pkt_stats_get_gradient_beacon() + pkt_stats_get_heartbeat();
 }
 
-void pkt_stats_get_and_reset_topo_metrics(uint32_t *drops, uint32_t *fwd_rate)
-{
-    if (drops) {
-        *drops = (uint32_t)atomic_clear(&queue_drop_count);
-    }
-    if (fwd_rate) {
-        *fwd_rate = (uint32_t)atomic_clear(&topo_fwd_count);
-    }
-}
-
 void pkt_stats_reset(void)
 {
     atomic_set(&gradient_beacon_count, 0);
@@ -286,8 +258,6 @@ void pkt_stats_reset(void)
     atomic_set(&data_fwd_count, 0);
     atomic_set(&route_change_count, 0);
     atomic_set(&rx_data_count, 0); /* [NEW] */
-    atomic_set(&queue_drop_count, 0);
-    atomic_set(&topo_fwd_count, 0);
     
     pkt_stats_clear_rtt_history();
     

@@ -794,6 +794,10 @@ static void topo_poll_handler(struct k_work *work);
 /* Sink-side sequence counter for polling sessions (0-15, wraps around) */
 static uint8_t s_topo_seq_counter;
 
+/* [NEW] Accumulator for MAC layer absolute total packets sent 
+ * (Preserved across 30s STAT resets to estimate battery) */
+static uint32_t s_mac_total_sent_accum = 0;
+
 /**
  * @brief Helper: Execute Atomic Snapshot of neighbor table.
  *        Copies ALL valid (non-expired, non-unassigned) neighbors up to
@@ -854,10 +858,20 @@ static bool topo_take_snapshot(struct bt_mesh_gradient_srv *srv,
   srv->topo_ctx.current_page = 1;
   srv->topo_ctx.is_reporting = true; /* Lock ON */
 
-  /* [NEW] Capture Drops and Fwd Rate once for the entire report session */
-  uint32_t drops = 0;
-  uint32_t fwd_rate = 0;
-  pkt_stats_get_and_reset_topo_metrics(&drops, &fwd_rate);
+  /* [NEW] Capture Drops and Fwd Rate from Zephyr MAC once for the entire report session */
+  struct bt_mesh_statistic stats;
+  bt_mesh_stat_get(&stats);
+  
+  uint32_t drops = (stats.tx_local_planned - stats.tx_local_succeeded) + 
+                   (stats.tx_adv_relay_planned - stats.tx_adv_relay_succeeded);
+  uint32_t fwd_rate = stats.tx_local_succeeded + stats.tx_adv_relay_succeeded;
+  
+  /* Accumulate into absolute lifetime tracker before 30s reset */
+  s_mac_total_sent_accum += fwd_rate;
+  
+  /* Reset MAC statistics immediately for the next 30s window */
+  bt_mesh_stat_reset();
+
   srv->topo_ctx.drop_count_snapshot = (uint8_t)MIN(drops, 255);
   srv->topo_ctx.fwd_rate_snapshot = (uint16_t)MIN(fwd_rate, 65535);
 
@@ -958,20 +972,14 @@ static void topo_reply_work_handler(struct k_work *work) {
   net_buf_simple_add_u8(&msg, tctx->drop_count_snapshot);
   net_buf_simple_add_le16(&msg, tctx->fwd_rate_snapshot);
 
-  /* Reset mesh statistics only after sending the last page of this session */
-  if (tctx->current_page >= tctx->total_pages) {
-    bt_mesh_stat_reset();
-  }
+  /* (MAC stats resetted directly in topo_take_snapshot) */
 
   /* [NEW] Add Node Uptime (4B) in seconds */
   uint32_t node_uptime_s = (uint32_t)(k_uptime_get() / 1000);
   net_buf_simple_add_le32(&msg, node_uptime_s);
 
-  /* [NEW] Add Total Data Packets Sent (4B) = Data_TX + Data_FWD */
-  struct packet_stats pkts;
-  pkt_stats_get(&pkts);
-  uint32_t total_sent = pkts.data_tx + pkts.data_fwd_tx;
-  net_buf_simple_add_le32(&msg, total_sent);
+  /* [NEW] Add MAC-layer Total Packets Sent (4B) for precise battery estimation */
+  net_buf_simple_add_le32(&msg, s_mac_total_sent_accum);
 
   /* === Pack neighbor data (max 24B) === */
   for (uint8_t i = 0; i < neighbors_in_page; i++) {
