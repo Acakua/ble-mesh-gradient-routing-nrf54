@@ -31,6 +31,7 @@ typedef struct neighbor_entry {
 	int8_t rssi;        /**< Received signal strength indicator */
 	uint8_t gradient;   /**< Gradient value (distance to sink) */
 	int64_t last_seen;  /**< Timestamp of last received message (uptime in ms) */
+	int64_t first_seen; /**< Timestamp of first discovery (for link uptime) */
 	struct backprop_node *backprop_dest; /**< Linked list of reachable destinations (for reverse routing) */
 } neighbor_entry_t;
 

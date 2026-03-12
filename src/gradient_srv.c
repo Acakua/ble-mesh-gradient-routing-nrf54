@@ -12,8 +12,10 @@
 #include "packet_stats.h"
 #include "reverse_routing.h"
 #include "routing_policy.h"
+#include <zephyr/bluetooth/mesh/statistic.h>
 #include <zephyr/kernel.h>
 #include <zephyr/random/random.h>
+
 
 LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_INF);
 
@@ -832,6 +834,10 @@ static bool topo_take_snapshot(struct bt_mesh_gradient_srv *srv,
     srv->topo_ctx.snapshot[idx].addr = e->addr;
     srv->topo_ctx.snapshot[idx].rssi = e->rssi;
     srv->topo_ctx.snapshot[idx].grad = e->gradient;
+    /* [NEW] Calculate Link Uptime in seconds */
+    uint32_t uptime_s = (uint32_t)((now - e->first_seen) / 1000);
+    srv->topo_ctx.snapshot[idx].link_uptime =
+        (uint16_t)MIN(uptime_s, UINT16_MAX);
     srv->topo_ctx.total_valid++;
   }
 
@@ -848,8 +854,16 @@ static bool topo_take_snapshot(struct bt_mesh_gradient_srv *srv,
   srv->topo_ctx.current_page = 1;
   srv->topo_ctx.is_reporting = true; /* Lock ON */
 
-  LOG_INF("[TOPO] Snapshot: %d valid neighbors, %d pages, seq=%d",
-          srv->topo_ctx.total_valid, srv->topo_ctx.total_pages, seq_id);
+  /* [NEW] Capture Drops and Fwd Rate once for the entire report session */
+  uint32_t drops = 0;
+  uint32_t fwd_rate = 0;
+  pkt_stats_get_and_reset_topo_metrics(&drops, &fwd_rate);
+  srv->topo_ctx.drop_count_snapshot = (uint8_t)MIN(drops, 255);
+  srv->topo_ctx.fwd_rate_snapshot = (uint16_t)MIN(fwd_rate, 65535);
+
+  LOG_INF("[TOPO] Snapshot: %d valid neighbors, %d pages, seq=%d, Drops:%u, FwdR:%u",
+          srv->topo_ctx.total_valid, srv->topo_ctx.total_pages, seq_id,
+          srv->topo_ctx.drop_count_snapshot, srv->topo_ctx.fwd_rate_snapshot);
 
   return true;
 }
@@ -940,12 +954,32 @@ static void topo_reply_work_handler(struct k_work *work) {
   net_buf_simple_add_u8(&msg, tctx->current_page); /* Current_Page (1B) */
   net_buf_simple_add_u8(&msg, neighbors_in_page);  /* Neighbors_in_Page (1B) */
 
+  /* [NEW] Drop Count and Fwd Rate: Use values captured at snapshot time */
+  net_buf_simple_add_u8(&msg, tctx->drop_count_snapshot);
+  net_buf_simple_add_le16(&msg, tctx->fwd_rate_snapshot);
+
+  /* Reset mesh statistics only after sending the last page of this session */
+  if (tctx->current_page >= tctx->total_pages) {
+    bt_mesh_stat_reset();
+  }
+
+  /* [NEW] Add Node Uptime (4B) in seconds */
+  uint32_t node_uptime_s = (uint32_t)(k_uptime_get() / 1000);
+  net_buf_simple_add_le32(&msg, node_uptime_s);
+
+  /* [NEW] Add Total Data Packets Sent (4B) = Data_TX + Data_FWD */
+  struct packet_stats pkts;
+  pkt_stats_get(&pkts);
+  uint32_t total_sent = pkts.data_tx + pkts.data_fwd_tx;
+  net_buf_simple_add_le32(&msg, total_sent);
+
   /* === Pack neighbor data (max 24B) === */
   for (uint8_t i = 0; i < neighbors_in_page; i++) {
     uint8_t idx = start_idx + i;
     net_buf_simple_add_le16(&msg, tctx->snapshot[idx].addr);
     net_buf_simple_add_u8(&msg, (uint8_t)tctx->snapshot[idx].rssi);
     net_buf_simple_add_u8(&msg, tctx->snapshot[idx].grad);
+    net_buf_simple_add_le16(&msg, tctx->snapshot[idx].link_uptime);
   }
 
   /* Send Uplink via Gradient Routing (hop-by-hop) */
@@ -988,8 +1022,8 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
                            struct net_buf_simple *buf) {
   struct bt_mesh_gradient_srv *srv = model->rt->user_data;
 
-  /* --- Parse 8-byte header --- */
-  if (buf->len < 8) {
+  /* --- Parse 17-byte header --- */
+  if (buf->len < 17) {
     return -EINVAL;
   }
   uint16_t origin_addr = net_buf_simple_pull_le16(buf);
@@ -998,6 +1032,10 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
   uint8_t total_and_seq = net_buf_simple_pull_u8(buf);
   uint8_t current_page = net_buf_simple_pull_u8(buf);
   uint8_t count = net_buf_simple_pull_u8(buf);
+  uint8_t drop_count = net_buf_simple_pull_u8(buf);
+  uint16_t fwd_rate = net_buf_simple_pull_le16(buf);
+  uint32_t node_uptime = net_buf_simple_pull_le32(buf);
+  uint32_t total_sent = net_buf_simple_pull_le32(buf);
 
   /* Unpack seq_id and total_pages from combined byte */
   uint8_t seq_id = (total_and_seq >> 4) & 0x0F;
@@ -1017,12 +1055,13 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     /* ═══════════════════════════════════════════════════════
      * I AM SINK: Parse and print to UART with SOF/EOF
      * Format:
-     * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,[neighbors]
+     * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,<Drops>,<FwdRate>,<Uptime>s,<TotalSent>,[neighbors]
      * ═══════════════════════════════════════════════════════ */
-    char uart_buf[200];
+    char uart_buf[300];
     int pos = snprintf(uart_buf, sizeof(uart_buf),
-                       "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", origin_addr, seq_id,
-                       total_pages, current_page, count, grad, parent);
+                       "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X,%u,%u,%u,%u", origin_addr,
+                       seq_id, total_pages, current_page, count, grad, parent,
+                       drop_count, fwd_rate, node_uptime, total_sent);
 
     for (int i = 0; i < count; i++) {
       /* Bounds checking before each pull */
@@ -1032,19 +1071,20 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
       uint16_t n_addr = net_buf_simple_pull_le16(buf);
       int8_t n_rssi = (int8_t)net_buf_simple_pull_u8(buf);
       uint8_t n_grad = net_buf_simple_pull_u8(buf);
+      uint16_t n_uptime = net_buf_simple_pull_le16(buf);
 
       if (pos < sizeof(uart_buf)) {
-        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%04X,%d,%d]",
-                        n_addr, n_rssi, n_grad);
+        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos,
+                        ",[%04X,%d,%d,%u]", n_addr, n_rssi, n_grad, n_uptime);
       }
     }
     printk("%s\n",
            uart_buf); /* Atomic print to avoid shell prompt interleaving */
 
-    LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, parent=0x%04X, "
-            "via 0x%04X)",
-            current_page, total_pages, origin_addr, seq_id, grad, parent,
-            ctx->addr);
+    LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, Drp=%u, FwdR=%u, "
+            "UP:%u, TX:%u, parent=0x%04X via 0x%04x)",
+            current_page, total_pages, origin_addr, seq_id, grad, drop_count, fwd_rate,
+            node_uptime, total_sent, parent, ctx->addr);
   } else {
     /* ═══════════════════════════════════════════════════════
      * I AM RELAY: Forward entire payload to my best parent
@@ -1069,13 +1109,17 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     net_buf_simple_add_u8(&fwd, total_and_seq); /* Preserve seq+pages */
     net_buf_simple_add_u8(&fwd, current_page);
     net_buf_simple_add_u8(&fwd, count);
+    net_buf_simple_add_u8(&fwd, drop_count);
+    net_buf_simple_add_le16(&fwd, fwd_rate);
+    net_buf_simple_add_le32(&fwd, node_uptime);
+    net_buf_simple_add_le32(&fwd, total_sent);
 
     for (int i = 0; i < count; i++) {
-      if (buf->len < 4) {
+      if (buf->len < 6) {
         break;
       }
-      uint8_t *chunk = net_buf_simple_pull_mem(buf, 4);
-      net_buf_simple_add_mem(&fwd, chunk, 4);
+      uint8_t *chunk = net_buf_simple_pull_mem(buf, 6);
+      net_buf_simple_add_mem(&fwd, chunk, 6);
     }
 
     struct bt_mesh_msg_ctx fwd_ctx = {
@@ -1223,9 +1267,7 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     /* [NEW] Topology Reporting Opcodes (Multi-Page v5) */
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REQ, BT_MESH_LEN_MIN(1), handle_topo_req},
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REP,
-     BT_MESH_LEN_MIN(
-         8), /* Header: Origin(2)+Grad(1)+Parent(2)+SeqPg(1)+CurPg(1)+Count(1)
-              */
+     BT_MESH_LEN_MIN(17), /* Header: 9B basic + 4B Uptime + 4B TotalSent */
      handle_topo_rep},
     BT_MESH_MODEL_OP_END,
 };

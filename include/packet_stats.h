@@ -44,6 +44,7 @@ struct packet_stats {
     uint32_t data_fwd_tx;          /**< DATA packet Forwarded count (Relay) */
     uint32_t route_change_count;   /**< Number of times best parent changed */
     uint32_t rx_data_count;        /**< [NEW] Count received DATA/BACKPROP at destination */
+    uint32_t queue_drop_count;     /**< [NEW] Count packet drops (queue full/no buffer) */
 };
 
 /**
@@ -103,6 +104,11 @@ void pkt_stats_inc_data_fwd(void);
 void pkt_stats_inc_route_change(void);
 
 /**
+ * @brief Increment Queue Drop counter
+ */
+void pkt_stats_inc_queue_drop(void);
+
+/**
  * @brief Get current packet statistics
  *
  * @param stats Pointer to struct to fill with current stats
@@ -140,6 +146,12 @@ uint32_t pkt_stats_get_data_fwd(void);
 uint32_t pkt_stats_get_route_change(void);
 
 /**
+ * @brief Get Queue Drop count
+ * @return Current count
+ */
+uint32_t pkt_stats_get_queue_drop(void);
+
+/**
  * @brief Increment RX Data counter
  */
 void pkt_stats_inc_rx(void);
@@ -149,6 +161,13 @@ void pkt_stats_inc_rx(void);
  * @return Current count
  */
 uint32_t pkt_stats_get_rx(void);
+
+/**
+ * @brief Get and reset Topology Metrics (Drop Count and Forwarding Rate)
+ * @param drops Pointer to store current drop count snippet
+ * @param fwd_rate Pointer to store current forwarding rate delta
+ */
+void pkt_stats_get_and_reset_topo_metrics(uint32_t *drops, uint32_t *fwd_rate);
 
 /**
  * @brief Get total CONTROL packet count (Beacon + Heartbeat)

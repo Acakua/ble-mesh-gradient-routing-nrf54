@@ -8,12 +8,8 @@
 #include <limits.h>
 #include <string.h>
 #include <zephyr/logging/log.h>
-#include "gradient_srv.h"
 
 LOG_MODULE_REGISTER(neighbor_table, LOG_LEVEL_INF);
-
-/* External reference for Delta Topology Trigger */
-extern struct bt_mesh_gradient_srv gradient_srv;
 
 void nt_init(neighbor_entry_t *table, size_t table_size)
 {
@@ -26,6 +22,7 @@ void nt_init(neighbor_entry_t *table, size_t table_size)
         table[i].rssi = INT8_MIN;
         table[i].gradient = UINT8_MAX;
         table[i].last_seen = 0;
+        table[i].first_seen = 0;
         table[i].backprop_dest = NULL; /* QUAN TRỌNG: Init NULL để tránh Kernel Panic */
     }
 }
@@ -94,6 +91,7 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
         // Tại vị trí insert_pos, reset backprop_dest vì đây là node mới
         // QUAN TRỌNG: Ngăn chặn dùng lại pointer rác của node cũ tại vị trí này
         table[insert_pos].backprop_dest = NULL; 
+        table[insert_pos].first_seen = now_ms; // [NEW] Ghi lại lần đầu thấy
     } 
     // TRƯỜNG HỢP B: Node đã tồn tại, cần cập nhật vị trí
     else {
@@ -139,13 +137,6 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
         // backprop_dest đã được xử lý ở bước 3
     }
 
-    /* [NEW] Delta Topology Trigger: Detect best-parent change */
-    if (table[0].addr != gradient_srv.topo_ctx.last_reported_parent &&
-        gradient_srv.gradient != 0 && gradient_srv.gradient != UINT8_MAX) {
-        gradient_srv.topo_ctx.last_reported_parent = table[0].addr;
-        bt_mesh_gradient_srv_trigger_delta_topo(&gradient_srv);
-    }
-
     return true;
 }
 
@@ -181,6 +172,7 @@ uint16_t nt_remove(neighbor_entry_t *table, size_t table_size, size_t idx)
     table[last].rssi = INT8_MIN;
     table[last].gradient = UINT8_MAX;
     table[last].last_seen = 0;
+    table[last].first_seen = 0;
     table[last].backprop_dest = NULL; /* QUAN TRỌNG: Phải set NULL */
 
     return removed_addr;
