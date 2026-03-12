@@ -177,7 +177,8 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
   int64_t now = k_uptime_get();
 
-  /* [ROBUST RRT] Update/Add RRT route for ANY Uplink message (Data/Heartbeat) */
+  /* [ROBUST RRT] Update/Add RRT route for ANY Uplink message (Data/Heartbeat)
+   */
   rrt_update_from_uplink_msg(gradient_srv, sender_addr, original_source, rssi,
                              now);
 
@@ -682,7 +683,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
   struct bt_mesh_gradient_srv *srv = model->rt->user_data;
 
   /* [ROBUST RRT] Update RRT for Report Response for ALL nodes (Sink & Relays)
-   * This ensures the node forwarding this packet also learns the uplink route. 
+   * This ensures the node forwarding this packet also learns the uplink route.
    */
   rrt_update_from_uplink_msg(srv, ctx->addr, reporter_addr, ctx->recv_rssi,
                              k_uptime_get());

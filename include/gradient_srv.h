@@ -5,7 +5,6 @@
 #include <bluetooth/mesh/model_types.h>
 #include <zephyr/bluetooth/mesh.h>
 
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -64,14 +63,16 @@ extern "C" {
   BT_MESH_MODEL_OP_3(0x15, BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
 /* Topology Reporting payload limits */
-#define TOPO_REP_MAX_NEIGHBORS 15 /* Send ALL valid entries, up to table size  \
-                                   */
-#define TOPO_REP_MAX_PER_PAGE 6   /* Max neighbors per page */
-#define TOPO_REP_MAX_PAYLOAD 32   /* 8B header + 24B data = 3 segments */
+#define TOPO_REP_MAX_NEIGHBORS                                                 \
+  15                            /* Send ALL valid entries, up to table size    \
+                                 */
+#define TOPO_REP_MAX_PER_PAGE 6 /* Max neighbors per page */
+#define TOPO_REP_MAX_PAYLOAD 32 /* 8B header + 24B data = 3 segments */
 
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE 1
-#define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE 64 /* Increased safety margin  \
-                                                    */
+#define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE                                \
+  64 /* Increased safety margin                                                \
+      */
 #define BT_MESH_GRADIENT_SRV_DATA_MSG_LEN                                      \
   7 /* Src(2)+Data(2)+TTL(1)+Hop(1)+MinRSSI(1) */
 #define BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL 10
