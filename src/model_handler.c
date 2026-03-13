@@ -31,11 +31,11 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
  * CẤU HÌNH TEST (TEST CONFIGURATION)
  * ========================================== */
 // 1. Cấu hình thời gian chạy test (1 phút)
-#define TEST_DURATION_MINUTES 20
+#define TEST_DURATION_MINUTES 30
 #define TEST_DURATION_MS (TEST_DURATION_MINUTES * 60 * 1000)
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 2000
+#define SENSOR_SEND_INTERVAL_MS 1000
 
 /* ==========================================
  * GLOBALS & WORK ITEMS
