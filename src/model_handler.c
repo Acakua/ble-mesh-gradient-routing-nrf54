@@ -9,7 +9,6 @@
 #include <dk_buttons_and_leds.h>
 #include <zephyr/bluetooth/bluetooth.h>
 
-
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_uart.h>
 
@@ -26,18 +25,17 @@
 #include "packet_stats.h" // [FIX] Thêm header này để dùng pkt_stats
 #include "reverse_routing.h"
 
-
 LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
 
 /* ==========================================
  * CẤU HÌNH TEST (TEST CONFIGURATION)
  * ========================================== */
 // 1. Cấu hình thời gian chạy test (1 phút)
-#define TEST_DURATION_MINUTES 60
+#define TEST_DURATION_MINUTES 20
 #define TEST_DURATION_MS (TEST_DURATION_MINUTES * 60 * 1000)
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 10000
+#define SENSOR_SEND_INTERVAL_MS 2000
 
 /* ==========================================
  * GLOBALS & WORK ITEMS
@@ -128,8 +126,8 @@ static void handle_data_received(struct bt_mesh_gradient_srv *srv,
     return;
   }
 
-  /* Toggle LEDs based on payload (0 -> LED 1, 1 -> LED 2, 2 -> LED 3, 3 -> LED 4)
-   * Note: Payload 0 (DK_LED1) matches the automatic BACKPROP indicator.
+  /* Toggle LEDs based on payload (0 -> LED 1, 1 -> LED 2, 2 -> LED 3, 3 -> LED
+   * 4) Note: Payload 0 (DK_LED1) matches the automatic BACKPROP indicator.
    */
   if (data == 0) {
     LOG_INF("Manual Toggle: LED 1 (Data: 0)");

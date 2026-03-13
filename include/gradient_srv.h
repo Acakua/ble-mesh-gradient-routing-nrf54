@@ -152,7 +152,7 @@ struct bt_mesh_gradient_srv_handlers {
 #define TOPO_REP_MAX_PER_PAGE   4
 
 /** Maximum payload bytes in a single TOPO_REP message */
-#define TOPO_REP_MAX_PAYLOAD    43  /* 19B header + 4*6B neighbors */
+#define TOPO_REP_MAX_PAYLOAD    44  /* 20B header + 4*6B neighbors */
 
 /**
  * @brief Neighbor item for Topology snapshot (packed into TOPO_REP)
@@ -174,8 +174,9 @@ struct sensor_topo_ctx {
   uint8_t total_pages;             /**< Calculated number of pages */
   uint8_t current_page;            /**< Current page being sent (1-indexed) */
   uint16_t last_reported_parent;   /**< For Delta Reporting trigger */
-  uint8_t drop_count_snapshot;     /**< [NEW] Queue drop count snapshot */
+  uint16_t drop_count_snapshot;    /**< [UPD] Queue drop count snapshot (uint16) */
   uint16_t fwd_rate_snapshot;      /**< [NEW] Forward rate snapshot */
+  uint32_t total_sent_snapshot;    /**< [NEW] Absolute total packets sent snapshot */
   bool is_reporting;               /**< Lock: true while drip-feed is active */
   uint8_t req_seq_id;              /**< Sequence ID from polling request (0-15) */
   struct k_work_delayable reply_work; /**< Delayed work for drip-feed TX */
@@ -215,6 +216,9 @@ struct bt_mesh_gradient_srv {
     /* Topology Reporting Context */
     struct sensor_topo_ctx topo_ctx;
     struct k_work_delayable topo_poll_work;
+
+    /* [NEW] Account for application-level send failures (Soft Drops) */
+    uint32_t soft_drop_count;
 };
 /* .. include_endpoint_gradient_srv_rst_3 */
 

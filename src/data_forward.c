@@ -163,9 +163,16 @@ static int data_send_internal(struct bt_mesh_gradient_srv *gradient_srv,
     LOG_INF("[TX] To 0x%04x: Src=0x%04x, Seq=%d, Hops=%d, MinRSSI=%d", 
             addr, original_source, data, hop_count, path_min_rssi);
     
-    return bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
+    int err = bt_mesh_model_send(gradient_srv->model, &ctx, &buf, 
                               &data_send_cb, 
                               (void *)(uintptr_t)addr);
+
+    if (err && err != -EAGAIN) {
+        gradient_srv->soft_drop_count++;
+        LOG_DBG("Soft Drop (Data) detected, total: %u", gradient_srv->soft_drop_count);
+    }
+
+    return err;
 }
 
 /* Handler Unused in Strict Mode but kept for compilation compatibility */

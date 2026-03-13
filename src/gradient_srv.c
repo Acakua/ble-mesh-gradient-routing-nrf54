@@ -56,6 +56,21 @@ extern uint32_t g_test_start_time;
 /* -------------------------------------------------------------------------
  * HELPER FUNCTIONS
  * ------------------------------------------------------------------------- */
+static int srv_send_msg_with_stat(struct bt_mesh_gradient_srv *srv,
+                                  struct bt_mesh_msg_ctx *ctx,
+                                  struct net_buf_simple *msg) {
+  int err = bt_mesh_model_send(srv->model, ctx, msg, NULL, NULL);
+
+  /* If send fails at Application level (Buffer Full, Queue Full, etc.)
+   * increment Soft Drop counter. We ignore -EAGAIN as it's often transient
+   * but -ENOMEM or -EBUSY are definitive drops in this context. */
+  if (err && err != -EAGAIN) {
+    srv->soft_drop_count++;
+    LOG_DBG("Soft Drop detected (err %d), total: %u", err, srv->soft_drop_count);
+  }
+
+  return err;
+}
 
 /******************************************************************************/
 /* Message Handlers                                                           */
@@ -331,7 +346,7 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
       .send_rel = true, /* [FIX] Reliable delivery for Backprop */
   };
 
-  bt_mesh_model_send(gradient_srv->model, &tx_ctx, &msg, NULL, NULL);
+  srv_send_msg_with_stat(gradient_srv, &tx_ctx, &msg);
   return 0;
 }
 
@@ -403,7 +418,7 @@ static int handle_report_req(const struct bt_mesh_model *model,
         .send_ttl = ctx->recv_ttl - 1,
     };
 
-    (void)bt_mesh_model_send(model, &send_ctx, &msg, NULL, NULL);
+    (void)srv_send_msg_with_stat(srv, &send_ctx, &msg);
   }
 
   return 0;
@@ -496,7 +511,7 @@ static int handle_test_start(const struct bt_mesh_model *model,
         .send_ttl = ctx->recv_ttl - 1,  // Giảm TTL đi 1
     };
 
-    (void)bt_mesh_model_send(model, &send_ctx, &msg, NULL, NULL);
+    (void)srv_send_msg_with_stat(srv, &send_ctx, &msg);
   }
 
   return 0;
@@ -604,7 +619,7 @@ static void report_retry_handler(struct k_work *work) {
     /* [UPDATED] Gửi Report đi nhưng KHÔNG dừng retry ngay lập tức.
      * Chỉ dừng khi nhận được REPORT_ACK từ Sink (xử lý ở handle_report_ack).
      */
-    int err = bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+    int err = srv_send_msg_with_stat(srv, &ctx, &msg);
     if (err) {
       LOG_ERR("Retry %u: Send failed (err %d)", srv->report_retry_count, err);
     }
@@ -653,7 +668,7 @@ static int handle_report_ack(const struct bt_mesh_model *model,
 
     LOG_DBG("Forwarding REPORT_ACK for 0x%04x to Nexthop 0x%04x", target_addr,
             nexthop);
-    bt_mesh_model_send(model, &new_ctx, &msg, NULL, NULL);
+    srv_send_msg_with_stat(srv, &new_ctx, &msg);
   } else {
     LOG_WRN("No route to forward REPORT_ACK for 0x%04x", target_addr);
   }
@@ -725,7 +740,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
           .addr = nexthop,
           .send_ttl = BT_MESH_TTL_DEFAULT,
       };
-      bt_mesh_model_send(model, &ack_ctx, &msg, NULL, NULL);
+      srv_send_msg_with_stat(srv, &ack_ctx, &msg);
       LOG_DBG("Sink sent REPORT_ACK for 0x%04x via Nexthop 0x%04x",
               reporter_addr, nexthop);
     } else {
@@ -767,7 +782,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
           .send_rel = true,
       };
 
-      bt_mesh_model_send(model, &fwd_ctx, &msg, NULL, NULL);
+      srv_send_msg_with_stat(srv, &fwd_ctx, &msg);
     } else {
       LOG_ERR("Relay 0x%04x has no PARENT to forward report from 0x%04x!",
               bt_mesh_model_elem(model)->rt->addr, reporter_addr);
@@ -862,22 +877,28 @@ static bool topo_take_snapshot(struct bt_mesh_gradient_srv *srv,
   struct bt_mesh_statistic stats;
   bt_mesh_stat_get(&stats);
   
-  uint32_t drops = (stats.tx_local_planned - stats.tx_local_succeeded) + 
-                   (stats.tx_adv_relay_planned - stats.tx_adv_relay_succeeded);
-  uint32_t fwd_rate = stats.tx_local_succeeded + stats.tx_adv_relay_succeeded;
+  uint32_t mac_planned = stats.tx_local_planned + stats.tx_adv_relay_planned;
+  uint32_t mac_succeeded = stats.tx_local_succeeded + stats.tx_adv_relay_succeeded;
   
-  /* Accumulate into absolute lifetime tracker before 30s reset */
-  s_mac_total_sent_accum += fwd_rate;
+  /* MAC Drops = Planned - Succeeded (with boundary safety clamping) */
+  uint32_t mac_drops = (mac_planned > mac_succeeded) ? (mac_planned - mac_succeeded) : 0;
   
-  /* Reset MAC statistics immediately for the next 30s window */
-  bt_mesh_stat_reset();
+  /* Universal Drops = MAC Hardware Drops + Application Soft Drops */
+  uint32_t total_drops = mac_drops + srv->soft_drop_count;
+  
+  srv->topo_ctx.drop_count_snapshot = (uint16_t)MIN(total_drops, 65535);
+  srv->topo_ctx.fwd_rate_snapshot = (uint16_t)MIN(mac_succeeded, 65535);
 
-  srv->topo_ctx.drop_count_snapshot = (uint8_t)MIN(drops, 255);
-  srv->topo_ctx.fwd_rate_snapshot = (uint16_t)MIN(fwd_rate, 65535);
+  /* Absolute Total Sent = Accumulator (from previous resets) + Current statistics window */
+  srv->topo_ctx.total_sent_snapshot = s_mac_total_sent_accum + mac_succeeded;
+  
+  /* Clear local Soft Drop counter for the next window */
+  srv->soft_drop_count = 0;
 
-  LOG_INF("[TOPO] Snapshot: %d valid neighbors, %d pages, seq=%d, Drops:%u, FwdR:%u",
+  LOG_INF("[TOPO] Snapshot: %d valid neighbors, %d pages, seq=%d, Drops:%u, FwdR:%u, TotalSent:%u",
           srv->topo_ctx.total_valid, srv->topo_ctx.total_pages, seq_id,
-          srv->topo_ctx.drop_count_snapshot, srv->topo_ctx.fwd_rate_snapshot);
+          srv->topo_ctx.drop_count_snapshot, srv->topo_ctx.fwd_rate_snapshot,
+          srv->topo_ctx.total_sent_snapshot);
 
   return true;
 }
@@ -968,18 +989,33 @@ static void topo_reply_work_handler(struct k_work *work) {
   net_buf_simple_add_u8(&msg, tctx->current_page); /* Current_Page (1B) */
   net_buf_simple_add_u8(&msg, neighbors_in_page);  /* Neighbors_in_Page (1B) */
 
-  /* [NEW] Drop Count and Fwd Rate: Use values captured at snapshot time */
-  net_buf_simple_add_u8(&msg, tctx->drop_count_snapshot);
+  /* [UPD] Drop Count (2B) and Fwd Rate (2B): Use values captured at snapshot time */
+  net_buf_simple_add_le16(&msg, tctx->drop_count_snapshot);
   net_buf_simple_add_le16(&msg, tctx->fwd_rate_snapshot);
 
-  /* (MAC stats resetted directly in topo_take_snapshot) */
+  /* (MAC stats reset only after the full report cycle to ensure continuity) */
+  if (tctx->current_page >= tctx->total_pages) {
+    struct bt_mesh_statistic stats;
+    bt_mesh_stat_get(&stats);
+    uint32_t current_window_succeeded = stats.tx_local_succeeded + stats.tx_adv_relay_succeeded;
+    /* Accumulator = snapshot value + delta sent DURING drip-feed phase.
+     * fwd_rate_snapshot was the mac_succeeded at snapshot time.  
+     * current_window_succeeded includes those PLUS packets sent during drip-feed.
+     * Delta = current_window_succeeded - fwd_rate_snapshot (drip-feed packets only). */
+    uint32_t drip_delta = (current_window_succeeded > tctx->fwd_rate_snapshot) 
+                        ? (current_window_succeeded - tctx->fwd_rate_snapshot) : 0;
+    s_mac_total_sent_accum = tctx->total_sent_snapshot + drip_delta;
+    bt_mesh_stat_reset();
+    LOG_DBG("[TOPO] Report done. Accum=%u (snap=%u + drip=%u)", 
+            s_mac_total_sent_accum, tctx->total_sent_snapshot, drip_delta);
+  }
 
   /* [NEW] Add Node Uptime (4B) in seconds */
   uint32_t node_uptime_s = (uint32_t)(k_uptime_get() / 1000);
   net_buf_simple_add_le32(&msg, node_uptime_s);
 
   /* [NEW] Add MAC-layer Total Packets Sent (4B) for precise battery estimation */
-  net_buf_simple_add_le32(&msg, s_mac_total_sent_accum);
+  net_buf_simple_add_le32(&msg, tctx->total_sent_snapshot);
 
   /* === Pack neighbor data (max 24B) === */
   for (uint8_t i = 0; i < neighbors_in_page; i++) {
@@ -998,7 +1034,7 @@ static void topo_reply_work_handler(struct k_work *work) {
       .send_rel = true, /* Segmented + BlockAck */
   };
 
-  int err = bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+  int err = srv_send_msg_with_stat(srv, &ctx, &msg);
   if (err) {
     LOG_ERR("[TOPO] Failed to send page %d/%d, err=%d", tctx->current_page,
             tctx->total_pages, err);
@@ -1030,8 +1066,8 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
                            struct net_buf_simple *buf) {
   struct bt_mesh_gradient_srv *srv = model->rt->user_data;
 
-  /* --- Parse 17-byte header --- */
-  if (buf->len < 17) {
+  /* --- Parse 20-byte header --- */
+  if (buf->len < 20) {
     return -EINVAL;
   }
   uint16_t origin_addr = net_buf_simple_pull_le16(buf);
@@ -1040,7 +1076,7 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
   uint8_t total_and_seq = net_buf_simple_pull_u8(buf);
   uint8_t current_page = net_buf_simple_pull_u8(buf);
   uint8_t count = net_buf_simple_pull_u8(buf);
-  uint8_t drop_count = net_buf_simple_pull_u8(buf);
+  uint16_t drop_count = net_buf_simple_pull_le16(buf);
   uint16_t fwd_rate = net_buf_simple_pull_le16(buf);
   uint32_t node_uptime = net_buf_simple_pull_le32(buf);
   uint32_t total_sent = net_buf_simple_pull_le32(buf);
@@ -1117,7 +1153,7 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     net_buf_simple_add_u8(&fwd, total_and_seq); /* Preserve seq+pages */
     net_buf_simple_add_u8(&fwd, current_page);
     net_buf_simple_add_u8(&fwd, count);
-    net_buf_simple_add_u8(&fwd, drop_count);
+    net_buf_simple_add_le16(&fwd, drop_count);
     net_buf_simple_add_le16(&fwd, fwd_rate);
     net_buf_simple_add_le32(&fwd, node_uptime);
     net_buf_simple_add_le32(&fwd, total_sent);
@@ -1137,7 +1173,7 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
         .send_rel = true,
     };
 
-    int err = bt_mesh_model_send(model, &fwd_ctx, &fwd, NULL, NULL);
+    int err = srv_send_msg_with_stat(srv, &fwd_ctx, &fwd);
     if (err) {
       LOG_ERR("[TOPO] Relay forward failed, err=%d", err);
     } else {
@@ -1188,7 +1224,7 @@ int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv) {
   };
 
   LOG_INF("[TOPO] Broadcasting TOPO_REQ (seq=%d)", s_topo_seq_counter);
-  return bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
 }
 
 /**
@@ -1275,7 +1311,7 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     /* [NEW] Topology Reporting Opcodes (Multi-Page v5) */
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REQ, BT_MESH_LEN_MIN(1), handle_topo_req},
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REP,
-     BT_MESH_LEN_MIN(17), /* Header: 9B basic + 4B Uptime + 4B TotalSent */
+     BT_MESH_LEN_MIN(20), /* 20B header (no neighbors) */
      handle_topo_rep},
     BT_MESH_MODEL_OP_END,
 };
@@ -1331,7 +1367,7 @@ static int handle_pong_message(const struct bt_mesh_model *model,
           .addr = nexthop,
           .send_ttl = BT_MESH_TTL_DEFAULT,
       };
-      bt_mesh_model_send(model, &fwd_ctx, &msg, NULL, NULL);
+      srv_send_msg_with_stat(srv, &fwd_ctx, &msg);
     } else {
       LOG_WRN("PONG Forward Failed: No route to 0x%04x", target_addr);
     }
@@ -1366,7 +1402,7 @@ int bt_mesh_gradient_srv_send_pong(struct bt_mesh_gradient_srv *srv,
 
   LOG_DBG("Sending PONG (Seq %u) for 0x%04x via Nexthop 0x%04x", seq, dest_addr,
           nexthop);
-  return bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
 }
 
 static int
@@ -1403,6 +1439,7 @@ static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model) {
   k_work_init_delayable(&gradient_srv->report_retry_work, report_retry_handler);
   gradient_srv->is_report_pending = false;
   gradient_srv->report_retry_count = 0;
+  gradient_srv->soft_drop_count = 0;
 
   net_buf_simple_init_with_data(&gradient_srv->pub_msg, gradient_srv->buf,
                                 sizeof(gradient_srv->buf));
@@ -1518,7 +1555,7 @@ int bt_mesh_gradient_srv_backprop_send(
       .send_rel = true, /* [FIX] Reliable delivery for Backprop */
   };
 
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
 
 /**
@@ -1545,7 +1582,7 @@ int bt_mesh_gradient_srv_send_report_req(
   };
 
   LOG_INF(">>> BROADCASTING REPORT REQUEST (ID: %d) <<<", current_tx_req_id);
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
 
 /**
@@ -1571,7 +1608,7 @@ int bt_mesh_gradient_srv_send_test_start(
   };
 
   LOG_INF(">>> BROADCASTING TEST START (ID: %d) <<<", current_tx_test_id);
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
 
 /**
@@ -1617,5 +1654,5 @@ int bt_mesh_gradient_srv_send_downlink_report(
 
   LOG_INF("Sending Downlink Report to 0x%04x (via 0x%04x), TX: %u", dest_addr,
           nexthop, total_tx);
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
