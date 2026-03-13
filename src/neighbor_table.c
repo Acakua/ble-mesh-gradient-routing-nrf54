@@ -36,7 +36,8 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
     }
 
     int existing_pos = -1;
-    struct backprop_node *saved_backprop = NULL; 
+    struct backprop_node *saved_backprop = NULL;
+    int64_t saved_first_seen = 0; /* [FIX] Lưu first_seen để không bị overwrite khi shift */
 
     /* 1. Tìm xem node đã tồn tại chưa */
     for (size_t i = 0; i < table_size; i++) {
@@ -44,6 +45,8 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
             existing_pos = i;
             /* Lưu lại danh sách RRT cũ (Linked List) để không bị mất khi sort/move */
             saved_backprop = table[i].backprop_dest;
+            /* [FIX] Lưu first_seen để restore sau khi shift (tránh bị overwrite bởi entry khác) */
+            saved_first_seen = table[i].first_seen;
             break;
         }
     }
@@ -124,8 +127,10 @@ bool nt_update_sorted(neighbor_entry_t *table, size_t table_size,
             }
         }
         
-        // Gán lại pointer đã lưu (QUAN TRỌNG: Giữ lại routing ngược của node này)
+        /* [FIX] Restore cả backprop_dest VÀ first_seen sau khi shift
+         * (first_seen tại insert_pos có thể đã bị overwrite bởi entry khác trong quá trình shift) */
         table[insert_pos].backprop_dest = saved_backprop;
+        table[insert_pos].first_seen    = saved_first_seen;
     }
 
     /* 4. Cập nhật thông tin tại insert_pos */

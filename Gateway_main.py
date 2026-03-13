@@ -67,6 +67,44 @@ def init_serial():
         os._exit(1)
 
 # ==========================================
+# TÍNH TOÁN ROUTING COST PER-LINK (MỖI HÀNG CSV)
+# ==========================================
+import math
+
+def compute_routing_cost_per_link(grad, nb_rssi, nb_link_up_s, drop_rate, pin):
+    """
+    Tính Routing_Cost cho TỪNG LINK riêng biệt (per-neighbor), đảm bảo mỗi
+    hàng CSV có giá trị khác nhau dựa vào RSSI và Link_UP của neighbor đó.
+
+    Công thức:
+      hop_cost       = grad × 10
+      signal_cost    = max(0, -nb_rssi - 70) × 2.5      [free zone tới -70 dBm]
+      reliability    = drop_rate^1.5                      [per-node]
+      battery_cost   = 200 if pin<20%, (60-pin)×1.5 if pin<60%, else 0
+      stability_cost = 200 × exp(-link_up / 300)         [per-link: decay 300s ~5phút]
+                       * Link mới < 1phút: ~196pt  (không tin cậy)
+                       * Link 5phút       :  ~90pt
+                       * Link 30phút      :  ~3pt   (hầu như ổn định)
+                       * Link 1 giờ+      :  ~0pt
+
+    Routing_Cost = hop + signal + reliability + battery + stability
+    """
+    hop_cost = grad * 10.0
+    signal_cost = max(0.0, (-nb_rssi - 70.0)) * 2.5
+    reliability_cost = pow(drop_rate, 1.5) if drop_rate > 0 else 0.0
+    if pin < 20.0:
+        battery_cost = 200.0
+    elif pin < 60.0:
+        battery_cost = (60.0 - pin) * 1.5
+    else:
+        battery_cost = 0.0
+    # Per-link stability: exponential decay, τ = 300s (5 phút)
+    stability_cost = 200.0 * math.exp(-nb_link_up_s / 300.0)
+    total = hop_cost + signal_cost + reliability_cost + battery_cost + stability_cost
+    return round(total, 2)
+
+
+# ==========================================
 # KHUNG SƯỜN TÍNH TOÁN NĂNG LƯỢNG
 # ==========================================
 def estimate_battery(uptime_s, tx_count):
@@ -74,32 +112,6 @@ def estimate_battery(uptime_s, tx_count):
     W_tx = 0.002      
     battery_left = 100.0 - (uptime_s * W_idle + tx_count * W_tx)
     return round(max(0.0, min(100.0, battery_left)), 1)
-
-# ==========================================
-# ROUTING COST (Exponential Penalty Framework)
-# ==========================================
-def compute_routing_cost(grad, rssi, drop_rate, pin):
-    """Ground-truth routing cost for Dijkstra edge weight.
-    Higher cost = more expensive to route through this link.
-    """
-    # 1. Hop cost: 1 hop = 10 units
-    hop_cost = grad * 10.0
-
-    # 2. Signal cost: free zone -30 to -75 dBm, penalty beyond -75
-    signal_cost = max(0.0, (-rssi - 75)) * 2.0
-
-    # 3. Reliability cost: exponential penalty (1% ~ 1pt, 10% ~ 31pt, 20% ~ 89pt)
-    reliability_cost = (drop_rate ** 1.5)
-
-    # 4. Battery cost: hard barrier below 20%, progressive 20-60%
-    if pin < 20.0:
-        battery_cost = 200.0   # Hard barrier: Dijkstra must avoid this node
-    elif pin < 60.0:
-        battery_cost = (60.0 - pin) * 1.5
-    else:
-        battery_cost = 0.0
-
-    return round(hop_cost + signal_cost + reliability_cost + battery_cost, 2)
 
 # ==========================================
 # LUỒNG 1: ĐỌC SERIAL
@@ -191,21 +203,12 @@ def commit_topology_to_temp(origin):
         
     pin_est = estimate_battery(data['uptime'], data['total_sent'])
     
-    # Feature Engineering: Drop Rate
+    # [SỬA]: Feature Engineering - Tính tỷ lệ Drop Rate (%) cho ML
     total_processed = data['drp'] + data['fwdr']
     drop_rate = 0.0
     if total_processed > 0:
         drop_rate = round((data['drp'] / total_processed) * 100.0, 1)
-
-    # Ground Truth: Routing Cost (Exponential Penalty Framework)
-    # Computed per-neighbor (per-link) using node-level metrics
-    routing_cost = compute_routing_cost(
-        grad=data['grad'],
-        rssi=0,          # placeholder: will be overridden per-neighbor below
-        drop_rate=drop_rate,
-        pin=pin_est
-    )
-
+    
     current_cycle_data[origin] = {
         "grad": data['grad'], 
         "parent": data['parent'], 
@@ -214,9 +217,7 @@ def commit_topology_to_temp(origin):
         "drp": data['drp'],
         "fwdr": data['fwdr'],
         "drop_rate": drop_rate,
-        "pin": pin_est,
-        "node_drop_rate": drop_rate,
-        "node_pin": pin_est,
+        "pin": pin_est
     }
 
 def reconcile_master_graph():
@@ -248,25 +249,31 @@ def save_to_csv_ramdisk():
         with open(RAM_DISK_CSV, 'a', newline='') as f:
             writer = csv.writer(f)
             if not file_exists:
-                # Header: thêm Routing_Cost là ground truth label
-                writer.writerow(["Timestamp", "Origin", "Grad", "Parent", "Neighbor", "RSSI", "Link_UP(s)", "Drop_Count", "Fwd_Count", "Drop_Rate(%)", "Pin(%)", "Routing_Cost"])
+                writer.writerow([
+                    "Timestamp", "Origin", "Grad", "Parent",
+                    "Neighbor", "RSSI", "Link_UP(s)",
+                    "Drop_Count", "Fwd_Count", "Drop_Rate(%)", "Pin(%)",
+                    "Routing_Cost"   # [NEW] Per-link Routing_Cost
+                ])
             for origin, data in current_cycle_data.items():
-                # [GIỮ NGUYÊN]: Giữ lại mẹo ép kiểu ="" để phục vụ Excel
                 safe_origin = f'="{origin}"'
                 safe_parent = f'="{data["parent"]}"'
-                
                 for nb in data["neighbors"]:
                     safe_neighbor = f'="{nb["addr"]}"'
-                    # Routing_Cost is per-link: uses link RSSI + node-level drop/pin
-                    link_cost = compute_routing_cost(
-                        grad=data["grad"],
-                        rssi=nb["rssi"],
-                        drop_rate=data["node_drop_rate"],
-                        pin=data["node_pin"]
+                    # [NEW] Tính Routing_Cost per-link (khác nhau cho từng neighbor)
+                    routing_cost = compute_routing_cost_per_link(
+                        grad         = data["grad"],
+                        nb_rssi      = nb["rssi"],
+                        nb_link_up_s = nb["link_uptime"],
+                        drop_rate    = data["drop_rate"],
+                        pin          = data["pin"]
                     )
-                    writer.writerow([ts, safe_origin, data["grad"], safe_parent, safe_neighbor,
-                                     nb["rssi"], nb["link_uptime"], data["drp"], data["fwdr"],
-                                     data["drop_rate"], data["pin"], link_cost])
+                    writer.writerow([
+                        ts, safe_origin, data["grad"], safe_parent,
+                        safe_neighbor, nb["rssi"], nb["link_uptime"],
+                        data["drp"], data["fwdr"], data["drop_rate"],
+                        data["pin"], routing_cost
+                    ])
     except Exception as e:
         pass
 

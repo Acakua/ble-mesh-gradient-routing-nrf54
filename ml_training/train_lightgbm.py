@@ -1,13 +1,14 @@
 """
 LightGBM Routing Cost Predictor
 ================================
-Target: Routing_Cost (pre-computed ground truth in CSV using Exponential Penalty Framework)
+Target: Routing_Cost (pre-computed ground truth in CSV)
 
 Formula (computed in Gateway_main.py per-link):
-  hop_cost         = Grad x 10
-  signal_cost      = max(0, -RSSI - 75) x 2       [free zone to -75 dBm]
-  reliability_cost = Drop_Rate(%)^1.5              [exponential: 10%->31pt, 20%->89pt]
+  hop_cost         = Grad x 10.0
+  signal_cost      = max(0, -RSSI - 70) x 2.5       [free zone t\u1edbi -70 dBm]
+  reliability_cost = Drop_Rate(%)^1.5               [per-node]
   battery_cost     = 200 if Pin<20%, (60-Pin)*1.5 if Pin<60%, else 0
+  stability_cost   = 200 x exp(-Link_UP / 300)      [per-link decay t=300s]
   Routing_Cost     = sum of above
 """
 
@@ -15,7 +16,6 @@ import pandas as pd
 import numpy as np
 import glob
 import os
-import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -26,8 +26,9 @@ from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 # ==========================================
 # CONFIG
 # ==========================================
-CSV_PATTERN   = r'C:\Users\admin\Documents\Work\GRADIENT_SRV\wsn_training_data_ready.csv'
-MODEL_OUTPUT  = r'C:\Users\admin\Documents\Work\GRADIENT_SRV\routing_cost_model.pkl'
+CSV_PATTERN   = r'C:\Users\admin\Documents\Work\GRADIENT_SRV\ml_training\wsn_training_data_ready.csv'
+# Native LightGBM format: cross-platform (Windows train -> Linux ARM Pi inference)
+MODEL_OUTPUT  = r'C:\Users\admin\Documents\Work\GRADIENT_SRV\ml_training\routing_cost_model.txt'
 
 FEATURE_COLS = [
     'Grad',
@@ -68,10 +69,9 @@ def load_data(pattern):
 # DERIVED FEATURES
 # ==========================================
 def add_derived_features(df):
-    df['cycle'] = df['Timestamp'].dt.floor('30s')
-    nbcount = df.groupby(['cycle', 'Origin'])['Neighbor'].count().reset_index()
-    nbcount.columns = ['cycle', 'Origin', 'Neighbor_Count']
-    df = df.merge(nbcount, on=['cycle', 'Origin'], how='left')
+    # Neighbor_Count: stateless - count per (Timestamp, Origin) cycle
+    # Matches Gateway real-time: neighbor_count = len(data["neighbors"])
+    df['Neighbor_Count'] = df.groupby(['Timestamp', 'Origin'])['Neighbor'].transform('count')
     df['Link_Stability']    = np.log1p(df['Link_UP(s)'])
     df['Load_Per_Neighbor'] = df['Fwd_Count'] / (df['Neighbor_Count'] + 1)
     return df
@@ -96,15 +96,13 @@ def train(df):
         objective='regression',
         metric='rmse',
         boosting_type='gbdt',
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=6,
-        num_leaves=31,
+        n_estimators=150,        # Pi-optimized: 150 trees sufficient for this feature space
+        learning_rate=0.08,      # Slightly higher to compensate fewer trees
+        max_depth=4,             # Shallow: Pi predicts ~4x faster than depth=6
+        num_leaves=15,           # Matches max_depth=4
         min_child_samples=20,
         subsample=0.8,
         colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
         random_state=42,
         n_jobs=-1,
         verbose=-1,
@@ -215,9 +213,15 @@ if __name__ == '__main__':
 
     model = train(df)
 
-    with open(MODEL_OUTPUT, 'wb') as f:
-        pickle.dump({'model': model, 'features': FEATURE_COLS}, f)
+    # Save as native LightGBM text format: cross-platform, no pickle
+    # Compatible: Windows x86_64 train -> Linux ARM Pi inference
+    model.booster_.save_model(MODEL_OUTPUT)
+    # Also save feature list alongside the model
+    feat_file = MODEL_OUTPUT.replace('.txt', '_features.txt')
+    with open(feat_file, 'w') as f:
+        f.write('\n'.join(FEATURE_COLS))
     print(f"\n[Export] Model saved: {MODEL_OUTPUT}")
+    print(f"[Export] Feature list: {feat_file}")
 
     demo_predict(model)
     print("\nDone!")

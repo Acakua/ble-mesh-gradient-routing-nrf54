@@ -1,0 +1,10 @@
+Grad
+RSSI
+Link_UP(s)
+Drop_Count
+Fwd_Count
+Drop_Rate(%)
+Pin(%)
+Neighbor_Count
+Link_Stability
+Load_Per_Neighbor
