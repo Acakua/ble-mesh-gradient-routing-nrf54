@@ -60,6 +60,19 @@ const neighbor_entry_t *find_strict_upstream_parent(
         return NULL;
     }
 
+    /* [SDN AI] Check if we have an active SDN route */
+    if (srv->sdn_next_hop_active != BT_MESH_ADDR_UNASSIGNED && srv->sdn_next_hop_active != 0) {
+        /* We must return the neighbor_entry_t from the table. */
+        for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+            if (srv->forwarding_table[i].addr == srv->sdn_next_hop_active) {
+                return &srv->forwarding_table[i];
+            }
+        }
+        /* If not in table, fall back to default dynamic routing */
+        LOG_WRN("[AI SDN] Failed to find active NextHop 0x%04x in Forwarding Table. Falling back.", srv->sdn_next_hop_active);
+    }
+
+    /* Fallback exactly as before */
     for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
         const neighbor_entry_t *entry = nt_get(
             (const neighbor_entry_t *)srv->forwarding_table,

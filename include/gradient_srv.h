@@ -63,6 +63,10 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_TOPO_REP BT_MESH_MODEL_OP_3(0x15, \
                         BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
+/* [NEW] Backprop Broadcast (Phase 1 Hybrid Push) */
+#define BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST BT_MESH_MODEL_OP_3(0x16, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE  1
 #define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE  64 /* Increased safety margin */
 #define BT_MESH_GRADIENT_SRV_DATA_MSG_LEN        7  /* Src(2)+Data(2)+TTL(1)+Hop(1)+MinRSSI(1) */
@@ -219,6 +223,10 @@ struct bt_mesh_gradient_srv {
 
     /* [NEW] Account for application-level send failures (Soft Drops) */
     uint32_t soft_drop_count;
+
+    /* [NEW] SDN 2-Phase Commit State */
+    uint16_t sdn_next_hop_pending;
+    uint16_t sdn_next_hop_active;
 };
 /* .. include_endpoint_gradient_srv_rst_3 */
 
@@ -335,9 +343,10 @@ void topo_routing_init(struct bt_mesh_gradient_srv *srv);
 
 /** @brief Broadcast a TOPO_REQ to all nodes (Sink only).
  *  @param srv Pointer to gradient server instance.
+ *  @param commit_flag Boolean to indicate if this is a commit request.
  *  @retval 0 Successfully sent.
  */
-int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv);
+int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv, bool commit_flag);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

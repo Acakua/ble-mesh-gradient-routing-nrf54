@@ -298,6 +298,11 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     } else if (payload == 0xFFFD) {
       LOG_INF("[CONTROL] Received STATS RESET (via Backprop)!");
       pkt_stats_reset();
+    } else if ((payload & 0x8000) == 0x8000) {
+      /* [PHASE 1] Unicast Backprop SDN Route Update */
+      uint16_t new_nexthop = payload & 0x7FFF;
+      LOG_WRN("[SDN 2PC] RX Unicast Route! Pending NextHop = 0x%04x", new_nexthop);
+      gradient_srv->sdn_next_hop_pending = new_nexthop;
     } else {
       /* [NEW] CSV LOG AT SENSOR FOR DOWNLINK */
       printk("CSV_LOG,BACKPROP,0x%04x,0x%04x,%d,%d,%u,%d\n", my_addr,
@@ -347,6 +352,56 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
   };
 
   srv_send_msg_with_stat(gradient_srv, &tx_ctx, &msg);
+  return 0;
+}
+
+static uint8_t last_processed_bundle_id = 0xFF;
+
+static int handle_backprop_broadcast(const struct bt_mesh_model *model,
+                                     struct bt_mesh_msg_ctx *ctx,
+                                     struct net_buf_simple *buf) {
+  struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+  uint16_t my_addr = bt_mesh_model_elem(model)->rt->addr;
+
+  if (ctx->addr == my_addr) return 0; // Loopback
+  if (buf->len < 1) return -EINVAL;
+
+  uint8_t bundle_id = net_buf_simple_pull_u8(buf);
+  if (bundle_id == last_processed_bundle_id) return 0; // Duplicate
+  
+  last_processed_bundle_id = bundle_id;
+
+  LOG_INF(">>> RX BACKPROP BROADCAST (Bundle: %d) from 0x%04x <<<", bundle_id, ctx->addr);
+
+  // Parse remaining len (must be multiple of 4: Node(2), Nexthop(2))
+  struct net_buf_simple_state state;
+  net_buf_simple_save(buf, &state);
+
+  while (buf->len >= 4) {
+      uint16_t target_node = net_buf_simple_pull_le16(buf);
+      uint16_t nexthop = net_buf_simple_pull_le16(buf);
+      if (target_node == my_addr) {
+          LOG_WRN("[SDN 2PC] RX Broadcast Route Update! Pending NextHop = 0x%04x", nexthop);
+          srv->sdn_next_hop_pending = nexthop;
+      }
+  }
+
+  net_buf_simple_restore(buf, &state);
+
+  // Re-broadcast
+  if (srv->gradient != 0 && ctx->recv_ttl > 1) {
+      BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, 127);
+      bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST);
+      net_buf_simple_add_u8(&msg, bundle_id);
+      net_buf_simple_add_mem(&msg, buf->data, buf->len);
+
+      struct bt_mesh_msg_ctx send_ctx = {
+          .app_idx = model->keys[0],
+          .addr = BT_MESH_ADDR_ALL_NODES,
+          .send_ttl = ctx->recv_ttl - 1,
+      };
+      (void)srv_send_msg_with_stat(srv, &send_ctx, &msg);
+  }
   return 0;
 }
 
@@ -917,13 +972,24 @@ static int handle_topo_req(const struct bt_mesh_model *model,
     return 0;
   }
 
-  /* Extract seq_id from payload (1 byte) */
-  uint8_t seq_id = 0;
+  /* Extract payload (1 byte) */
+  uint8_t payload = 0;
   if (buf->len >= 1) {
-    seq_id = net_buf_simple_pull_u8(buf) & 0x0F;
+    payload = net_buf_simple_pull_u8(buf);
   }
+  
+  uint8_t seq_id = payload & 0x0F;
+  bool is_commit = (payload & 0x80) != 0;
 
-  LOG_INF("[TOPO] RX TOPO_REQ from 0x%04x, seq=%d", ctx->addr, seq_id);
+  LOG_INF("[TOPO] RX TOPO_REQ from 0x%04x, seq=%d, commit=%d", ctx->addr, seq_id, is_commit);
+
+  if (is_commit) {
+      if (srv->sdn_next_hop_pending != BT_MESH_ADDR_UNASSIGNED && srv->sdn_next_hop_pending != 0) {
+          LOG_WRN("[SDN 2PC] COMMIT! Active NextHop updated to 0x%04x", srv->sdn_next_hop_pending);
+          srv->sdn_next_hop_active = srv->sdn_next_hop_pending;
+          srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED; // Reset for next time
+      }
+  }
 
   /* 1. Atomic Snapshot (will fail if drip-feed is active) */
   if (!topo_take_snapshot(srv, seq_id)) {
@@ -1199,7 +1265,7 @@ static void topo_poll_handler(struct k_work *work) {
     return;
   }
 
-  bt_mesh_gradient_srv_send_topo_req(srv);
+  bt_mesh_gradient_srv_send_topo_req(srv, false);
 
   /* Reschedule */
   k_work_reschedule(&srv->topo_poll_work,
@@ -1207,14 +1273,16 @@ static void topo_poll_handler(struct k_work *work) {
 }
 
 /**
- * @brief [PUBLIC] Broadcast OP_TOPO_REQ with Sequence ID.
+ * @brief [PUBLIC] Broadcast OP_TOPO_REQ with Sequence ID and optional Commit Flag.
  */
-int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv) {
+int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv, bool commit_flag) {
   s_topo_seq_counter = (s_topo_seq_counter + 1) & 0x0F; /* Wrap 0-15 */
+  
+  uint8_t payload = (commit_flag ? 0x80 : 0x00) | s_topo_seq_counter;
 
   BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TOPO_REQ, 1);
   bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TOPO_REQ);
-  net_buf_simple_add_u8(&msg, s_topo_seq_counter);
+  net_buf_simple_add_u8(&msg, payload);
 
   struct bt_mesh_msg_ctx ctx = {
       .app_idx = srv->model->keys[0],
@@ -1313,6 +1381,8 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REP,
      BT_MESH_LEN_MIN(20), /* 20B header (no neighbors) */
      handle_topo_rep},
+    {BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, BT_MESH_LEN_MIN(5), /* 1B ID + at least 1 pair(4B) */
+     handle_backprop_broadcast},
     BT_MESH_MODEL_OP_END,
 };
 

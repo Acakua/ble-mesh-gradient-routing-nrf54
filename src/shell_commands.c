@@ -644,17 +644,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(stats_subcmds,
 /*============================================================================*/
 
 /**
- * @brief Yêu cầu tất cả Sensor gửi báo cáo Topology
+ * @brief Yêu cầu tất cả Sensor gửi báo cáo Topology & Piggyback Commit flag
  *
- * Lệnh: mesh topo_req
- *
- * Phát Broadcast OP_TOPO_REQ ra toàn mạng lưới.
- * Các Sensor Node sẽ trả lời với OP_TOPO_REP sau một khoảng Jitter ngẫu nhiên.
+ * Lệnh: mesh topo_req [commit_flag]
  */
 static int cmd_mesh_topo_req(const struct shell *sh, size_t argc, char **argv) {
-  ARG_UNUSED(argc);
-  ARG_UNUSED(argv);
-
   if (!check_provisioned(sh)) {
     return -ENOEXEC;
   }
@@ -664,9 +658,14 @@ static int cmd_mesh_topo_req(const struct shell *sh, size_t argc, char **argv) {
     return -ENOEXEC;
   }
 
-  int err = bt_mesh_gradient_srv_send_topo_req(&gradient_srv);
+  bool commit_flag = false;
+  if (argc == 2) {
+      commit_flag = (atoi(argv[1]) != 0);
+  }
+
+  int err = bt_mesh_gradient_srv_send_topo_req(&gradient_srv, commit_flag);
   if (!err) {
-    shell_print(sh, "Da phat Broadcast TOPO_REQ! Cho 8-10 giay...");
+    shell_print(sh, "Da phat Broadcast TOPO_REQ (Commit=%d)! Cho 8-10 giay...", commit_flag);
   } else {
     shell_error(sh, "Gui that bai, err=%d", err);
   }
@@ -737,6 +736,57 @@ static int cmd_mesh_attention(const struct shell *sh, size_t argc, char **argv) 
 }
 
 /*============================================================================*/
+/*                         Command: mesh backprop_broadcast                   */
+/*============================================================================*/
+
+static int cmd_mesh_backprop_broadcast(const struct shell *sh, size_t argc, char **argv) {
+  if (argc != 2) {
+    shell_error(sh, "Sai cu phap! Dung: mesh backprop_broadcast <hex_pairs>");
+    return -EINVAL;
+  }
+  if (!check_provisioned(sh)) return -ENOEXEC;
+  if (gradient_srv.gradient != 0) {
+    shell_error(sh, "Chi Gateway moi co the gui BACKPROP BROADCAST!");
+    return -ENOEXEC;
+  }
+
+  size_t hex_len = strlen(argv[1]);
+  if (hex_len % 8 != 0 || hex_len > 240) { 
+    shell_error(sh, "Chuoi hex khong hop le (phai boi so cua 8 characters)");
+    return -EINVAL;
+  }
+
+  static uint8_t next_bundle_id = 1;
+  uint8_t bundle_id = next_bundle_id++;
+
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, 127);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST);
+  net_buf_simple_add_u8(&msg, bundle_id);
+
+  for (size_t i = 0; i < hex_len; i += 4) {
+      char tmp[5] = {0};
+      strncpy(tmp, argv[1] + i, 4);
+      uint16_t val = (uint16_t)strtoul(tmp, NULL, 16);
+      net_buf_simple_add_le16(&msg, val);
+  }
+
+  struct bt_mesh_msg_ctx ctx = {
+      .app_idx = gradient_srv.model->keys[0],
+      .addr = BT_MESH_ADDR_ALL_NODES,
+      .send_ttl = BT_MESH_TTL_DEFAULT,
+  };
+
+  LOG_INF(">>> Pushing Hybrid Broadcast Bundle %d <<<", bundle_id);
+  int err = bt_mesh_model_send(gradient_srv.model, &ctx, &msg, NULL, NULL);
+  if (err) {
+      shell_error(sh, "Gui that bai, err=%d", err);
+  } else {
+      shell_print(sh, "BACKPROP BROADCAST da gui thanh cong!");
+  }
+  return err;
+}
+
+/*============================================================================*/
 /*                         Shell Command Registration                         */
 /*============================================================================*/
 
@@ -791,8 +841,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
               cmd_mesh_stats_show),
 
     SHELL_CMD_ARG(topo_req, NULL,
-                  "Yeu cau Sensor bao cao Topology: mesh topo_req",
-                  cmd_mesh_topo_req, 1, 0),
+                  "Yeu cau Sensor bao cao Topology: mesh topo_req [commit_flag]",
+                  cmd_mesh_topo_req, 1, 1),
+
+    SHELL_CMD_ARG(backprop_broadcast, NULL,
+                  "Push Broadcast: mesh backprop_broadcast <hex>\n",
+                  cmd_mesh_backprop_broadcast, 2, 0),
 
     SHELL_SUBCMD_SET_END);
 
