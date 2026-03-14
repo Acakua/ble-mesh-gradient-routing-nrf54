@@ -79,9 +79,9 @@ def compute_routing_cost_per_link(grad, nb_rssi, nb_link_up_s, drop_rate, pin):
     Công thức:
       hop_cost       = grad × 10
       signal_cost    = max(0, -nb_rssi - 70) × 2.5      [free zone tới -70 dBm]
-      reliability    = drop_rate^1.5                      [per-node]
+      reliability    = drop_rate^1.5                      [capped at 400]
       battery_cost   = 200 if pin<20%, (60-pin)×1.5 if pin<60%, else 0
-      stability_cost = 200 × exp(-link_up / 300)         [per-link: decay 300s ~5phút]
+      stability_cost = 100 × exp(-link_up / 300)         [max 100, τ = 300s]
                        * Link mới < 1phút: ~196pt  (không tin cậy)
                        * Link 5phút       :  ~90pt
                        * Link 30phút      :  ~3pt   (hầu như ổn định)
@@ -91,15 +91,15 @@ def compute_routing_cost_per_link(grad, nb_rssi, nb_link_up_s, drop_rate, pin):
     """
     hop_cost = grad * 10.0
     signal_cost = max(0.0, (-nb_rssi - 70.0)) * 2.5
-    reliability_cost = pow(drop_rate, 1.5) if drop_rate > 0 else 0.0
+    reliability_cost = min(400.0, pow(drop_rate, 1.5)) if drop_rate > 0 else 0.0
     if pin < 20.0:
         battery_cost = 200.0
     elif pin < 60.0:
         battery_cost = (60.0 - pin) * 1.5
     else:
         battery_cost = 0.0
-    # Per-link stability: exponential decay, τ = 300s (5 phút)
-    stability_cost = 200.0 * math.exp(-nb_link_up_s / 300.0)
+    # Per-link stability: exponential decay, τ = 300s (5 phút), max points reduced to 100
+    stability_cost = 100.0 * math.exp(-nb_link_up_s / 300.0)
     total = hop_cost + signal_cost + reliability_cost + battery_cost + stability_cost
     return round(total, 2)
 

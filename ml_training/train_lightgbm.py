@@ -6,9 +6,9 @@ Target: Routing_Cost (pre-computed ground truth in CSV)
 Formula (computed in Gateway_main.py per-link):
   hop_cost         = Grad x 10.0
   signal_cost      = max(0, -RSSI - 70) x 2.5       [free zone t\u1edbi -70 dBm]
-  reliability_cost = Drop_Rate(%)^1.5               [per-node]
+  reliability_cost = min(400, Drop_Rate(%)^1.5)      [capped at 400]
   battery_cost     = 200 if Pin<20%, (60-Pin)*1.5 if Pin<60%, else 0
-  stability_cost   = 200 x exp(-Link_UP / 300)      [per-link decay t=300s]
+  stability_cost   = 100 x exp(-Link_UP / 300)      [max 100, t=300s]
   Routing_Cost     = sum of above
 """
 
