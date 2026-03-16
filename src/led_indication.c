@@ -25,6 +25,7 @@ static bool attention_active = false;
 #define LED_FORWARD     DK_LED2  /* LED for data forwarded */
 #define LED_SINK        DK_LED1  /* LED for sink received */
 #define LED_BACKPROP    DK_LED1  /* LED 0 for backprop received */
+#define LED_SDN         DK_LED4  /* LED for SDN commitment */
 
 /* Blink parameters */
 #define BLINK_COUNT_MAX       6    /* 6 toggles = 3 complete on/off cycles */
@@ -148,4 +149,11 @@ void led_indicate_attention(bool on)
         k_work_reschedule(&attention_led_work, K_NO_WAIT);
     }
     /* When off, the handler will stop and clear LEDs */
+}
+
+void led_indicate_sdn_commit(void)
+{
+    static bool led_state = false;
+    led_state = !led_state;
+    dk_set_led(LED_SDN, led_state);
 }

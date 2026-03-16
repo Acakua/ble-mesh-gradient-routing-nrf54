@@ -55,6 +55,13 @@ void led_indicate_backprop_received(void);
  */
 void led_indicate_attention(bool on);
 
+/**
+ * @brief Indicate SDN route commitment
+ *
+ * Toggles LED 4 to show an AI-driven SDN route has been committed.
+ */
+void led_indicate_sdn_commit(void);
+
 #ifdef __cplusplus
 }
 #endif

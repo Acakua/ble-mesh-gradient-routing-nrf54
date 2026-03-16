@@ -298,8 +298,13 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     } else if (payload == 0xFFFD) {
       LOG_INF("[CONTROL] Received STATS RESET (via Backprop)!");
       pkt_stats_reset();
-    } else if ((payload & 0x8000) == 0x8000) {
-      /* [PHASE 1] Unicast Backprop SDN Route Update */
+    } else if (payload == 0xFFFC) {
+      LOG_INF("[CONTROL] Received ATTENTION MODE (via Backprop)!");
+      if (gradient_srv->handlers->data_received) {
+        gradient_srv->handlers->data_received(gradient_srv, payload);
+      }
+    } else if ((payload & 0x8000) == 0x8000 && payload < 0xFF00) {
+      /* [PHASE 1] Unicast Backprop SDN Route Update (Exclude special range 0xFF00+) */
       uint16_t new_nexthop = payload & 0x7FFF;
       LOG_WRN("[SDN 2PC] RX Unicast Route! Pending NextHop = 0x%04x", new_nexthop);
       gradient_srv->sdn_next_hop_pending = new_nexthop;
@@ -988,6 +993,9 @@ static int handle_topo_req(const struct bt_mesh_model *model,
           LOG_WRN("[SDN 2PC] COMMIT! Active NextHop updated to 0x%04x", srv->sdn_next_hop_pending);
           srv->sdn_next_hop_active = srv->sdn_next_hop_pending;
           srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED; // Reset for next time
+
+          /* [NEW] Visual Feedback: Toggle LED 4 when AI route is committed */
+          led_indicate_sdn_commit();
       }
   }
 
@@ -1023,11 +1031,10 @@ static void topo_reply_work_handler(struct k_work *work) {
 
   uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
 
-  /* Find Uplink nexthop (best parent = index 0) */
-  k_mutex_lock(&srv->forwarding_table_mutex, K_FOREVER);
-  uint16_t nexthop = srv->forwarding_table[0].addr;
-  uint16_t parent_addr = nexthop;
-  k_mutex_unlock(&srv->forwarding_table_mutex);
+  /* Find actual nexthop being used for Uplink routing */
+  const neighbor_entry_t *best_parent = find_strict_upstream_parent(srv, BT_MESH_ADDR_UNASSIGNED);
+  uint16_t parent_addr = (best_parent != NULL) ? best_parent->addr : BT_MESH_ADDR_UNASSIGNED;
+  uint16_t nexthop = parent_addr;
 
   if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
     LOG_WRN("[TOPO] No uplink route, aborting drip-feed");
@@ -1175,7 +1182,7 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
 
     for (int i = 0; i < count; i++) {
       /* Bounds checking before each pull */
-      if (buf->len < 4) {
+      if (buf->len < 6) {
         break;
       }
       uint16_t n_addr = net_buf_simple_pull_le16(buf);
