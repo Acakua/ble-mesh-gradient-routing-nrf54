@@ -209,19 +209,18 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
     /* [MODIFIED] Log thêm Delay vào CSV (Chỉ log khi phiên test đang chạy) */
     if (pkt_stats_is_enabled()) {
+      char csv_buf[128];
       if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
-        /* [UPDATED] Format: TYPE, Src, Sender, Hops, DelayMs */
-        printk("CSV_LOG,HEARTBEAT,0x%04x,0x%04x,%d,%u\n", original_source,
-               sender_addr, hop_count, delay_ms);
+        snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,HEARTBEAT,0x%04x,0x%04x,%d,%d",
+                 original_source, sender_addr, hop_count, delay_ms);
+        printk("%s\n", csv_buf);
       } else {
-        /* [NEW] Cập nhật với RSSI chặng cuối cùng về Sink */
         if (rssi < path_min_rssi) {
           path_min_rssi = rssi;
         }
-        /* [UPDATED] Format: TYPE, Src, Sender, Seq, Hops, DummyDelay,
-         * PathMinRSSI */
-        printk("CSV_LOG,DATA,0x%04x,0x%04x,%d,%d,0,%d\n", original_source,
-               sender_addr, received_data, hop_count, path_min_rssi);
+        snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,DATA,0x%04x,0x%04x,%d,%d,0,%d",
+                 original_source, sender_addr, received_data, hop_count, path_min_rssi);
+        printk("%s\n", csv_buf);
 
         /* [NEW] Send PONG back to original source */
         bt_mesh_gradient_srv_send_pong(gradient_srv, original_source,
@@ -308,14 +307,18 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
       uint16_t new_nexthop = payload & 0x7FFF;
       LOG_WRN("[SDN 2PC] RX Unicast Route! Pending NextHop = 0x%04x", new_nexthop);
       gradient_srv->sdn_next_hop_pending = new_nexthop;
+      
+      /* [NEW] Update expiry on route reception (5 minute TTL) */
+      gradient_srv->sdn_route_expiry = k_uptime_get() + (5 * 60 * 1000);
     } else {
-      /* [NEW] CSV LOG AT SENSOR FOR DOWNLINK */
-      printk("CSV_LOG,BACKPROP,0x%04x,0x%04x,%d,%d,%u,%d\n", my_addr,
-             sender_addr, payload, hop_count, delay_ms, path_min_rssi);
+      /* [NEW] CSV LOG AT SENSOR FOR DOWNLINK (Atomic) */
+      char csv_buf[120];
+      snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,BACKPROP,0x%04x,0x%04x,%d,%d,%u,%d",
+               my_addr, sender_addr, payload, hop_count, delay_ms, path_min_rssi);
+      printk("%s\n", csv_buf);
 
-      LOG_INF("[CONTROL - Backprop] Destination Reached! Payload: %d, Hops: "
-              "%d, Delay: %u ms",
-              payload, hop_count, delay_ms);
+      LOG_INF("[CONTROL - Backprop] Destination Reached! Payload: %d, Hops: %d",
+              payload, hop_count);
       pkt_stats_inc_rx();
       if (gradient_srv->handlers->data_received) {
         gradient_srv->handlers->data_received(gradient_srv, payload);
@@ -385,9 +388,19 @@ static int handle_backprop_broadcast(const struct bt_mesh_model *model,
   while (buf->len >= 4) {
       uint16_t target_node = net_buf_simple_pull_le16(buf);
       uint16_t nexthop = net_buf_simple_pull_le16(buf);
-      if (target_node == my_addr) {
+      
+      if (target_node == BT_MESH_ADDR_ALL_NODES && nexthop == 0x0000) {
+          /* [NEW] SDN RESET - Clear active and pending routes (Broadcast) */
+          LOG_INF("[SDN 2PC] Received RESET command! Reverting to Gradient.");
+          srv->sdn_next_hop_active = BT_MESH_ADDR_UNASSIGNED;
+          srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED;
+          srv->sdn_route_expiry = 0;
+          pkt_stats_reset();
+      } else if (target_node == my_addr) {
           LOG_WRN("[SDN 2PC] RX Broadcast Route Update! Pending NextHop = 0x%04x", nexthop);
           srv->sdn_next_hop_pending = nexthop;
+          /* [NEW] Update expiry (5 minute TTL) */
+          srv->sdn_route_expiry = k_uptime_get() + (5 * 60 * 1000);
       }
   }
 
@@ -771,10 +784,11 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
     LOG_INF("SINK received REPORT from 0x%04x (Forwarded by 0x%04x)",
             reporter_addr, ctx->addr);
 
-    // Format log cho Python script (Dùng reporter_addr để định danh đúng node)
-    // [NEW] Format: TYPE, Src, Tx, Beacon, HB, RouteChanges, FwdCount, RxCount
-    printk("CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u,%u,%u\n", reporter_addr, data_tx,
-           beacon_tx, hb_tx, route_changes, data_fwd, rx_count);
+    // Format log cho Python script (Dùng reporter_addr để định danh đúng node) (Atomic)
+    char csv_buf[128];
+    snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u,%u,%u",
+             reporter_addr, data_tx, beacon_tx, hb_tx, route_changes, data_fwd, rx_count);
+    printk("%s\n", csv_buf);
 
     /* [NEW] Log Individual RTTs */
     for (int i = 0; i < rtt_samples; i++) {
@@ -1517,6 +1531,9 @@ static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model) {
   gradient_srv->is_report_pending = false;
   gradient_srv->report_retry_count = 0;
   gradient_srv->soft_drop_count = 0;
+  gradient_srv->sdn_next_hop_active = BT_MESH_ADDR_UNASSIGNED;
+  gradient_srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED;
+  gradient_srv->sdn_route_expiry = 0;
 
   net_buf_simple_init_with_data(&gradient_srv->pub_msg, gradient_srv->buf,
                                 sizeof(gradient_srv->buf));

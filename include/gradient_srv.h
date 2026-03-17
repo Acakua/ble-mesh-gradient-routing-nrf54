@@ -227,6 +227,7 @@ struct bt_mesh_gradient_srv {
     /* [NEW] SDN 2-Phase Commit State */
     uint16_t sdn_next_hop_pending;
     uint16_t sdn_next_hop_active;
+    int64_t sdn_route_expiry; // [NEW] Soft-state: Time when active route expires
 };
 /* .. include_endpoint_gradient_srv_rst_3 */
 

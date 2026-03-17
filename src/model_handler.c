@@ -126,6 +126,15 @@ static void handle_data_received(struct bt_mesh_gradient_srv *srv,
     return;
   }
 
+  /* [NEW] Skip LED triggers if I am the Gateway (gradient == 0) and this is
+   * likely a data payload (0-1000). We only want to handle explicit commands
+   * or special payloads like 0xFFFC.
+   */
+  if (srv->gradient == 0 && data < 0xFF00) {
+    /* Log nothing to keep Sink UART clean of sensor data commands */
+    return;
+  }
+
   /* Toggle LEDs based on payload (0 -> LED 1, 1 -> LED 2, 2 -> LED 3, 3 -> LED
    * 4) Note: Payload 0 (DK_LED1) matches the automatic BACKPROP indicator.
    */

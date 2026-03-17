@@ -324,6 +324,60 @@ static int cmd_mesh_dest(const struct shell *sh, size_t argc, char **argv) {
 }
 
 /*============================================================================*/
+/*                         Command: mesh sdn_reset                           */
+/*============================================================================*/
+
+/**
+ * @brief Gửi lệnh RESET SDN cho toàn bộ mạng
+ *
+ * Lệnh: mesh sdn_reset
+ */
+static int cmd_mesh_sdn_reset(const struct shell *sh, size_t argc, char **argv) {
+  ARG_UNUSED(argc);
+  ARG_UNUSED(argv);
+
+  if (!check_provisioned(sh)) {
+    return -EAGAIN;
+  }
+
+  /* Chỉ cho phép Gateway gửi lệnh reset hệ thống */
+  if (gradient_srv.gradient != 0) {
+    shell_error(sh, "Chi node GATEWAY moi co the gui lenh SDN RESET!");
+    return -EACCES;
+  }
+
+  shell_print(sh, "Dang gui lenh SDN RESET (Broadcast) cho toan mang...");
+
+  /* [NEW] Gửi lệnh RESET qua cơ chế BACKPROP Broadcast */
+  /* Payload: target_node = 0xFFFF (ALL_NODES), nexthop = 0x0000 */
+  static uint8_t next_reset_bundle_id = 1;
+  uint8_t bundle_id = next_reset_bundle_id++;
+
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, 127);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST);
+  net_buf_simple_add_u8(&msg, bundle_id);
+  
+  net_buf_simple_add_le16(&msg, BT_MESH_ADDR_ALL_NODES); /* target_node = 0xFFFF */
+  net_buf_simple_add_le16(&msg, 0x0000);                 /* nexthop = 0x0000 */
+
+  struct bt_mesh_msg_ctx ctx = {
+      .app_idx = gradient_srv.model->keys[0],
+      .addr = BT_MESH_ADDR_ALL_NODES,
+      .send_ttl = BT_MESH_TTL_DEFAULT,
+  };
+
+  int err = bt_mesh_model_send(gradient_srv.model, &ctx, &msg, NULL, NULL);
+
+  if (err) {
+    shell_error(sh, "Gui lenh SDN RESET that bai! err=%d", err);
+    return err;
+  }
+
+  shell_print(sh, "Da gui lenh SDN RESET thanh cong.");
+  return 0;
+}
+
+/*============================================================================*/
 /*                         Command: mesh backprop                             */
 /*============================================================================*/
 
@@ -848,21 +902,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
                   "Push Broadcast: mesh backprop_broadcast <hex>\n",
                   cmd_mesh_backprop_broadcast, 2, 0),
 
+    SHELL_CMD_ARG(backprop_broadcast, NULL,
+                  "Push Broadcast: mesh backprop_broadcast <hex>\n",
+                  cmd_mesh_backprop_broadcast, 2, 0),
+
+    SHELL_CMD_ARG(sdn_reset, NULL, 
+                  "Gui lenh RESET SDN cho toan mang (Chi Gateway)",
+                  cmd_mesh_sdn_reset, 1, 0),
+
     SHELL_SUBCMD_SET_END);
 
 /**
  * Đăng ký command chính "mesh"
  */
-SHELL_CMD_REGISTER(mesh, &mesh_cmds,
-                   "Cac lenh dieu khien Gradient Routing Mesh\n"
-                   "  mesh info      - Thong tin node\n"
-                   "  mesh fwd       - Forwarding Table\n"
-                   "  mesh rrt       - Reverse Routing Table\n"
-                   "  mesh dest      - Danh sach destination\n"
-                   "  mesh backprop  - Gui BACKPROP (Gateway)\n"
-                   "  mesh attention - Bat Attention Mode (Gateway)\n"
-                   "  mesh data      - Gui DATA (Node)\n"
-                   "  mesh heartbeat - Trang thai heartbeat\n"
-                   "  mesh stats     - Thong ke goi tin TX\n"
-                   "  mesh topo_req  - Quet Topology toan mang",
+                    "  mesh stats     - Thong ke goi tin TX\n"
+                    "  mesh topo_req  - Quet Topology toan mang\n"
+                    "  mesh sdn_reset - Reset SDN toan mang",
                    NULL);

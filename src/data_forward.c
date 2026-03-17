@@ -62,14 +62,21 @@ const neighbor_entry_t *find_strict_upstream_parent(
 
     /* [SDN AI] Check if we have an active SDN route */
     if (srv->sdn_next_hop_active != BT_MESH_ADDR_UNASSIGNED && srv->sdn_next_hop_active != 0) {
-        /* We must return the neighbor_entry_t from the table. */
-        for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
-            if (srv->forwarding_table[i].addr == srv->sdn_next_hop_active) {
-                return &srv->forwarding_table[i];
+        /* [NEW] Check Soft-state expiry (5 minute TTL) */
+        if (k_uptime_get() < srv->sdn_route_expiry) {
+            /* We must return the neighbor_entry_t from the table. */
+            for (int i = 0; i < CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE; i++) {
+                if (srv->forwarding_table[i].addr == srv->sdn_next_hop_active) {
+                    return &srv->forwarding_table[i];
+                }
             }
+            /* If not in table, fall back to default dynamic routing */
+            LOG_WRN("[AI SDN] Failed to find active NextHop 0x%04x in Forwarding Table. Falling back.", srv->sdn_next_hop_active);
+        } else {
+            LOG_WRN("[AI SDN] Route for 0x%04x expired (TTL). Reverting to Gradient.", srv->sdn_next_hop_active);
+            srv->sdn_next_hop_active = BT_MESH_ADDR_UNASSIGNED;
+            srv->sdn_route_expiry = 0;
         }
-        /* If not in table, fall back to default dynamic routing */
-        LOG_WRN("[AI SDN] Failed to find active NextHop 0x%04x in Forwarding Table. Falling back.", srv->sdn_next_hop_active);
     }
 
     /* Fallback exactly as before */
