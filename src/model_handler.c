@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
 #define TEST_DURATION_MS (TEST_DURATION_MINUTES * 60 * 1000)
 
 // 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 1000
+#define SENSOR_SEND_INTERVAL_MS 2000
 
 /* ==========================================
  * GLOBALS & WORK ITEMS

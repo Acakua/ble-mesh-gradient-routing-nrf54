@@ -14,13 +14,14 @@ import uvicorn
 import asyncio
 import lightgbm as lgb
 import numpy as np
+import datetime
 
 # ==========================================
 # CẤU HÌNH HỆ THỐNG & ĐỊNH DANH PHIÊN (SESSION)
 # ==========================================
 BAUD_RATE = 115200
-POLLING_INTERVAL = 30 
-COLLECTION_WINDOW = 15 
+POLLING_INTERVAL = 60 
+COLLECTION_WINDOW = 30 
 PAGE_TIMEOUT = 4 
 BACKUP_INTERVAL = 300 
 GATEWAY_NODE = "0002" 
@@ -29,17 +30,25 @@ SESSION_ID = time.strftime("%Y%m%d_%H%M%S")
 
 if os.name == 'nt':  
     SERIAL_PORT = r'\\.\COM32' 
-    RAM_DISK_CSV = f'topology_log_{SESSION_ID}.csv' 
+    RAM_DISK_CSV = f'topology_log_{SESSION_ID}.csv'
+    PERFORMANCE_CSV = f'performance_log_{SESSION_ID}.csv'
     BACKUP_DIR = 'wsn_backup\\' 
 else:                
     SERIAL_PORT = '/dev/serial0'
-    RAM_DISK_CSV = f'/dev/shm/topology_log_{SESSION_ID}.csv' 
+    RAM_DISK_CSV = f'/dev/shm/topology_log_{SESSION_ID}.csv'
+    PERFORMANCE_CSV = f'/dev/shm/performance_log_{SESSION_ID}.csv'
     BACKUP_DIR = '/home/pi/wsn_backup/'
 
 # [UPD]: Regex bắt 11 nhóm (Drop_Count giờ là uint16, max 65535)
 # Format: $[TOPO],Origin,Seq,TotalPg,CurPg,Count,Grad,Parent,Drp(u16),FwdR(u16),Uptime(u32),TotalSent(u32),[neighbors]
 TOPO_PATTERN = r"\$\[TOPO\],([0-9A-F]{4}),(\d+),(\d+),(\d+),(\d+),(\d+),([0-9A-F]{4}),(\d+),(\d+),(\d+),(\d+),(.*)"
 NEIGHBOR_PATTERN = r"\[([0-9A-F]{4}),(-?\d+),(\d+),(\d+)\]"
+
+# [NEW] Regex cho các loại log mới từ sink_logger.py
+DATA_LOG_PATTERN = r"CSV_LOG,DATA,([^,]+),([^,]+),(\d+),(\d+),(\d+),(-?\d+)"
+RTT_LOG_PATTERN = r"CSV_LOG,RTT_DATA,([^,]+),(\d+),([\d\.]+)"
+HB_LOG_PATTERN = r"CSV_LOG,HEARTBEAT,([^,]+),([^,]+),(\d+),([\d\.]+)"
+REPORT_LOG_PATTERN = r"CSV_LOG,REPORT,([^,]+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)"
 
 # ==========================================
 # BIẾN TOÀN CỤC & KHÓA AN TOÀN
@@ -55,17 +64,44 @@ current_cycle_data = {}          # Fixed global warning
 page_assembly = {}               # Fixed global warning
 pending_commit = False           # Flag for Phase 2 piggyback
 
+# --- [NEW] DATA LOGGING CACHE (Ported from sink_logger.py) ---
+rx_stats = {}           # { src_hex: set(seq) }
+latency_tracker = {}    # { src_hex: rtt_ms }
+node_report_cache = {}  # { src_hex: { 'beacon_tx': val, 'hb_tx': val, ... } }
+latency_sync_cache = {} # { (src_hex, seq): timestamp }
+reported_nodes = set()  # To avoid duplicate reports in one cycle
+
 graph_lock = threading.Lock()
 serial_lock = threading.Lock() 
 
 # ------------------------------------------
 # LOAD AI MODEL
 # ------------------------------------------
-try:
-    AI_Model = lgb.Booster(model_file='lightgbm_routing_model.txt')
-    print("[Hệ Thống] Đã tải model AI LightGBM thành công!")
-except Exception as e:
-    print(f"[CẢNH BÁO] Không thể tải model LightGBM, sẽ dùng heuristic fallback. Lỗi: {e}")
+# Lấy đường dẫn tuyệt đối tới thư mục chứa file script
+BASE_DIR = os.path.dirname(__file__)
+
+# Danh sách các đường dẫn khả thi để tìm model
+POSSIBLE_PATHS = [
+    os.path.join(BASE_DIR, 'routing_cost_model.txt'),           # Hiện tại trên Pi của bạn
+    os.path.join(BASE_DIR, 'ml_training', 'routing_cost_model.txt') # Cấu trúc chuẩn trong repo
+]
+
+AI_Model = None
+MODEL_LOADED_PATH = None
+
+for path in POSSIBLE_PATHS:
+    if os.path.exists(path):
+        try:
+            AI_Model = lgb.Booster(model_file=path)
+            MODEL_LOADED_PATH = path
+            print(f"[Hệ Thống] Đã tải model AI LightGBM thành công từ: {path}")
+            break
+        except Exception as e:
+            print(f"[CẢNH BÁO] Lỗi khi load model tại {path}: {e}")
+
+if AI_Model is None:
+    print(f"[CẢNH BÁO] Không tìm thấy file model tại các vị trí: {POSSIBLE_PATHS}")
+    print("[Hệ Thống] Sẽ dùng heuristic fallback để tính toán routing cost.")
 
 app = FastAPI()
 global_ser = None
@@ -87,29 +123,25 @@ def init_serial():
 # ==========================================
 import math
 
-def compute_routing_cost_per_link(grad, nb_rssi, nb_link_up_s, drop_rate, pin):
+def compute_routing_cost_per_link(grad, nb_rssi, nb_link_up_s, drop_rate, pin, drop_count, fwd_count, neighbor_count, use_ai=True):
     """
     Tính Routing_Cost cho TỪNG LINK riêng biệt (per-neighbor), đảm bảo mỗi
     hàng CSV có giá trị khác nhau dựa vào RSSI và Link_UP của neighbor đó.
 
-    Công thức:
-      hop_cost       = grad × 10
-      signal_cost    = max(0, -nb_rssi - 70) × 2.5      [free zone tới -70 dBm]
-      reliability    = drop_rate^1.5                      [capped at 400]
-      battery_cost   = 200 if pin<20%, (60-pin)×1.5 if pin<60%, else 0
-      stability_cost = 100 × exp(-link_up / 300)         [max 100, τ = 300s]
-                       * Link mới < 1phút: ~196pt  (không tin cậy)
-                       * Link 5phút       :  ~90pt
-                       * Link 30phút      :  ~3pt   (hầu như ổn định)
-                       * Link 1 giờ+      :  ~0pt
-
-    Routing_Cost = hop + signal + reliability + battery + stability
-    Dùng Model LightGBM nếu có, nếu không thì fallback về Heuristic.
+    Dùng Model LightGBM (10 features) nếu có, nếu không thì fallback về Heuristic.
     """
-    if AI_Model is not None:
+    if use_ai and AI_Model is not None:
         try:
-            # Prepare feature array exactly as trained
-            features = np.array([[grad, nb_rssi, nb_link_up_s, drop_rate, pin]])
+            # Features derived to match training:
+            # ['Grad', 'RSSI', 'Link_UP(s)', 'Drop_Count', 'Fwd_Count', 
+            #  'Drop_Rate(%)', 'Pin(%)', 'Neighbor_Count', 'Link_Stability', 'Load_Per_Neighbor']
+            link_stability = math.log1p(nb_link_up_s)
+            load_per_neighbor = fwd_count / (neighbor_count + 1)
+
+            features = np.array([[
+                grad, nb_rssi, nb_link_up_s, drop_count, fwd_count,
+                drop_rate, pin, neighbor_count, link_stability, load_per_neighbor
+            ]])
             pred_cost = AI_Model.predict(features)[0]
             return round(pred_cost, 2)
         except Exception as e:
@@ -124,10 +156,157 @@ def compute_routing_cost_per_link(grad, nb_rssi, nb_link_up_s, drop_rate, pin):
         battery_cost = (60.0 - pin) * 1.5
     else:
         battery_cost = 0.0
-    # Per-link stability: exponential decay, τ = 300s (5 phút), max points reduced to 100
+    
     stability_cost = 100.0 * math.exp(-nb_link_up_s / 300.0)
     total = hop_cost + signal_cost + reliability_cost + battery_cost + stability_cost
     return round(total, 2)
+
+# --- [NEW] HELPER FUNCTIONS FOR CSV_LOG PARSING ---
+def safe_int_convert(val):
+    try:
+        if val is None: return 0
+        s = str(val).strip()
+        if not s: return 0
+        if s.lower().startswith('0x'): return int(s, 16)
+        # remove potential decimal for int conversion (e.g. "12.0")
+        if '.' in s: s = s.split('.')[0]
+        return int(s)
+    except: return 0
+
+def safe_float_convert(val):
+    try:
+        if val is None: return 0.0
+        s = str(val).strip()
+        if not s: return 0.0
+        return float(s)
+    except: return 0.0
+
+def write_performance_log(row_data):
+    """
+    Ghi dữ liệu vào file performance_log theo định dạng FINAL_LATENCY.
+    row_data: list khớp với các cột header.
+    """
+    try:
+        file_exists = os.path.isfile(PERFORMANCE_CSV)
+        with open(PERFORMANCE_CSV, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow([
+                    "Timestamp", "Type", "SourceAddr", "SenderAddr", 
+                    "Seq_or_TxCount", "HopCount", "Latency_ms", "PathMinRSSI", 
+                    "BeaconTx", "HeartbeatTx", "RouteChanges", "FwdCount", 
+                    "Rx_Unique_Count", "Remote_Rx_Count", "PDR_Percent"
+                ])
+            writer.writerow(row_data)
+    except Exception as e:
+        print(f"[PERF LOG ERROR] {e}")
+
+def handle_csv_log(line):
+    global rx_stats, latency_tracker, node_report_cache, latency_sync_cache, reported_nodes
+    now_ts = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
+    try:
+        if "CSV_LOG," not in line: return
+        raw_data = line.split("CSV_LOG,")[1]
+        parts = raw_data.split(',')
+        if not parts: return
+        log_type = parts[0].strip()
+
+        # row template: [Timestamp, Type, SourceAddr, SenderAddr, Seq_or_TxCount, HopCount, Latency_ms, PathMinRSSI, ...]
+        row = [now_ts, log_type, "", "", "", "", "", "", "", "", "", "", "", "", ""]
+
+        if log_type == "DATA":
+            if len(parts) >= 8:
+                src_val = safe_int_convert(parts[1])
+                sender_val = safe_int_convert(parts[2])
+                seq_val = safe_int_convert(parts[3])
+                hops = parts[4]
+                lat = parts[5]
+                rssi = parts[7] if len(parts) > 7 else parts[6]
+                
+                src_hex = f"0x{src_val:04x}"
+                if src_hex not in rx_stats: rx_stats[src_hex] = set()
+                rx_stats[src_hex].add(seq_val)
+                latency_sync_cache[(src_hex, seq_val)] = time.time()
+                
+                # Fill row for immediate logging
+                row[2] = src_hex
+                row[3] = f"0x{sender_val:04x}"
+                row[4] = seq_val
+                row[5] = hops
+                row[6] = lat
+                row[7] = rssi
+                write_performance_log(row)
+
+        elif log_type == "RTT_DATA":
+            if len(parts) >= 4:
+                src_hex = f"0x{safe_int_convert(parts[1]):04x}"
+                rtt_val = safe_float_convert(parts[3])
+                latency_tracker[src_hex] = rtt_val
+                # RTT_DATA is usually a direct update, can log as event if needed
+
+        elif log_type == "HEARTBEAT":
+            if len(parts) >= 5:
+                src_hex = f"0x{safe_int_convert(parts[1]):04x}"
+                sender_hex = f"0x{safe_int_convert(parts[2]):04x}"
+                latency_tracker[src_hex] = safe_float_convert(parts[4])
+                
+                row[2] = src_hex
+                row[3] = sender_hex
+                row[5] = parts[3] # Hops
+                row[6] = parts[4] # Latency
+                write_performance_log(row)
+
+        elif log_type == "REPORT":
+            if len(parts) >= 7:
+                src_hex = f"0x{safe_int_convert(parts[1]):04x}"
+                tx_count = safe_int_convert(parts[2])
+                beacon = safe_int_convert(parts[3])
+                hb = safe_int_convert(parts[4])
+                r_chg = safe_int_convert(parts[5])
+                fwd = safe_int_convert(parts[6])
+                remote_rx = safe_int_convert(parts[7]) if len(parts) > 7 else 0
+                
+                rx_unique = len(rx_stats.get(src_hex, set()))
+                pdr = (rx_unique / tx_count * 100.0) if tx_count > 0 else 0.0
+
+                node_report_cache[src_hex] = {
+                    'tx_count': tx_count,
+                    'beacon_tx': beacon,
+                    'hb_tx': hb,
+                    'route_changes': r_chg,
+                    'fwd_count': fwd,
+                    'remote_rx': remote_rx
+                }
+                
+                # Log report summary
+                row[2] = src_hex
+                row[4] = tx_count
+                row[8] = beacon
+                row[9] = hb
+                row[10] = r_chg
+                row[11] = fwd
+                row[12] = rx_unique
+                row[13] = remote_rx
+                row[14] = f"{pdr:.2f}"
+                write_performance_log(row)
+
+        elif log_type == "EVENT":
+            if len(parts) >= 2:
+                event_name = parts[1].strip()
+                msg = parts[2].strip() if len(parts) > 2 else ""
+                if "TEST_START" in event_name:
+                    rx_stats.clear()
+                    latency_tracker.clear()
+                    latency_sync_cache.clear()
+                    reported_nodes.clear()
+                    print(f"\n[LOGGER] --- NEW TEST SESSION: {event_name} (Caches Cleared) ---")
+                
+                row[2] = event_name
+                row[3] = msg
+                write_performance_log(row)
+
+    except Exception as e:
+        print(f"[LOGGER ERROR] Parsing line {line} -> {e}")
 
 
 # ==========================================
@@ -153,7 +332,7 @@ def uart_reader_thread():
                         line = global_ser.readline().decode('utf-8', errors='ignore').strip()
                         if line:
                             print(f"[RAW UART] {line}")
-                            if "$[TOPO]" in line:
+                            if "$[TOPO]" in line or "CSV_LOG" in line:
                                 uart_queue.put(line)
             time.sleep(0.01)
         except Exception:
@@ -250,6 +429,8 @@ def data_processor_thread():
                 page_assembly[origin]['ts'] = now 
                 if len(page_assembly[origin]['pages']) == int(total):
                     commit_topology_to_temp(origin)
+            elif "CSV_LOG" in raw_line and collecting_data:
+                handle_csv_log(raw_line)
         except queue.Empty: pass
 
 def commit_topology_to_temp(origin):
@@ -286,13 +467,24 @@ def reconcile_master_graph():
             
             Master_Graph.add_node(node, grad=data["grad"], color="green", drp=data["drp"], fwdr=data["fwdr"], drop_rate=data["drop_rate"], pin=data["pin"])
             Master_Graph.remove_edges_from([(u, v) for u, v in Master_Graph.edges if u == node])
+            nb_count = len(data["neighbors"])
             for nb in data["neighbors"]:
                 edge_cost = compute_routing_cost_per_link(
                     grad=data["grad"], nb_rssi=nb["rssi"], nb_link_up_s=nb["link_uptime"], 
-                    drop_rate=data["drop_rate"], pin=data["pin"]
+                    drop_rate=data["drop_rate"], pin=data["pin"],
+                    drop_count=data["drp"], fwd_count=data["fwdr"], neighbor_count=nb_count,
+                    use_ai=False # Raw View uses Heuristic Formula
                 )
                 Master_Graph.add_edge(node, nb["addr"], rssi=nb["rssi"], is_parent=(nb["addr"] == data["parent"]), 
                                       link_uptime=nb["link_uptime"], cost=edge_cost)
+            
+            # [FIX] Force-add Reported Parent edge if it's missing (e.g. not in neighbor list due to overflow)
+            parent = data["parent"]
+            if parent != "0000" and parent != "ffff":
+                if not Master_Graph.has_edge(node, parent):
+                    Master_Graph.add_edge(node, parent, rssi=-99, is_parent=True, link_uptime=0, cost=999, is_virtual=True)
+                else:
+                    Master_Graph[node][parent]['is_parent'] = True
         
         for node in list(Master_Graph.nodes):
             if node == GATEWAY_NODE: continue
@@ -307,6 +499,23 @@ def reconcile_master_graph():
         SDN_Graph = Master_Graph.copy()
         for node in list(SDN_Graph.nodes):
             if node == GATEWAY_NODE: continue
+            
+            # [NEW] Recalculate costs for SDN Graph using AI predictions
+            if node in current_cycle_data:
+                data = current_cycle_data[node]
+                nb_count = len(data["neighbors"])
+                for u, v, d in list(SDN_Graph.edges(node, data=True)):
+                    # Find neighbor data to get specific link_uptime/rssi
+                    nb_data = next((n for n in data["neighbors"] if n["addr"] == v), None)
+                    if nb_data:
+                        ai_cost = compute_routing_cost_per_link(
+                            grad=data["grad"], nb_rssi=nb_data["rssi"], nb_link_up_s=nb_data["link_uptime"],
+                            drop_rate=data["drop_rate"], pin=data["pin"],
+                            drop_count=data["drp"], fwd_count=data["fwdr"], neighbor_count=nb_count,
+                            use_ai=True # SDN View uses AI Prediction
+                        )
+                        SDN_Graph[u][v]['cost'] = ai_cost
+
             try:
                 # Find shortest path from node to Gateway using AI cost
                 path = nx.shortest_path(SDN_Graph, source=node, target=GATEWAY_NODE, weight='cost')
@@ -324,20 +533,24 @@ def reconcile_master_graph():
         for node in SDN_Graph.nodes:
             if node == GATEWAY_NODE: continue
             
-            new_parent = None
+            ai_parent = None
             for u, v, d in SDN_Graph.edges(data=True):
                 if u == node and d.get('is_parent', False):
-                    new_parent = v
+                    ai_parent = v
                     break
+            
+            # [NEW] Check if the ACTUAL parent reported by node matches AI recommendation
+            actual_parent = None
+            if node in Master_Graph:
+                for u, v, d in Master_Graph.edges(data=True):
+                    if u == node and d.get('is_parent', False):
+                        actual_parent = v
+                        # If matches AI, mark for styling
+                        Master_Graph[u][v]['is_ai_optimized'] = (v == ai_parent)
+                        break
                     
-            old_parent = None
-            for u, v, d in Master_Graph.edges(data=True):
-                if u == node and d.get('is_parent', False):
-                    old_parent = v
-                    break
-                    
-            if new_parent and old_parent and new_parent != old_parent:
-                delta_nodes.append((node, new_parent))
+            if ai_parent and actual_parent and ai_parent != actual_parent:
+                delta_nodes.append((node, ai_parent))
                 
         if len(delta_nodes) > 0:
             threading.Thread(target=execute_hybrid_push, args=(delta_nodes,), daemon=True).start()
@@ -355,26 +568,42 @@ def save_to_csv_ramdisk():
                     "Timestamp", "Origin", "Grad", "Parent",
                     "Neighbor", "RSSI", "Link_UP(s)",
                     "Drop_Count", "Fwd_Count", "Drop_Rate(%)", "Pin(%)",
-                    "Routing_Cost"   # [NEW] Per-link Routing_Cost
+                    "Routing_Cost", "AI_Routing_Cost"
                 ])
             for origin, data in current_cycle_data.items():
                 safe_origin = f'="{origin}"'
                 safe_parent = f'="{data["parent"]}"'
+                nb_count = len(data["neighbors"])
+                
                 for nb in data["neighbors"]:
                     safe_neighbor = f'="{nb["addr"]}"'
-                    # [NEW] Tính Routing_Cost per-link (khác nhau cho từng neighbor)
-                    routing_cost = compute_routing_cost_per_link(
+                    heuristic_cost = compute_routing_cost_per_link(
                         grad         = data["grad"],
                         nb_rssi      = nb["rssi"],
                         nb_link_up_s = nb["link_uptime"],
                         drop_rate    = data["drop_rate"],
-                        pin          = data["pin"]
+                        pin          = data["pin"],
+                        drop_count   = data["drp"],
+                        fwd_count    = data["fwdr"],
+                        neighbor_count = nb_count,
+                        use_ai       = False
+                    )
+                    ai_cost = compute_routing_cost_per_link(
+                        grad         = data["grad"],
+                        nb_rssi      = nb["rssi"],
+                        nb_link_up_s = nb["link_uptime"],
+                        drop_rate    = data["drop_rate"],
+                        pin          = data["pin"],
+                        drop_count   = data["drp"],
+                        fwd_count    = data["fwdr"],
+                        neighbor_count = nb_count,
+                        use_ai       = True
                     )
                     writer.writerow([
                         ts, safe_origin, data["grad"], safe_parent,
                         safe_neighbor, nb["rssi"], nb["link_uptime"],
                         data["drp"], data["fwdr"], data["drop_rate"],
-                        data["pin"], routing_cost
+                        data["pin"], heuristic_cost, ai_cost
                     ])
     except Exception as e:
         pass
@@ -385,9 +614,12 @@ def backup_csv_thread():
         time.sleep(BACKUP_INTERVAL)
         if os.path.exists(RAM_DISK_CSV):
             ts_now = time.strftime("%H%M%S")
-            backup_filename = f"topology_snapshot_{SESSION_ID}_{ts_now}.csv"
+            backup_topo = f"topology_snapshot_{SESSION_ID}_{ts_now}.csv"
+            backup_perf = f"performance_snapshot_{SESSION_ID}_{ts_now}.csv"
             try:
-                shutil.copy2(RAM_DISK_CSV, os.path.join(BACKUP_DIR, backup_filename))
+                shutil.copy2(RAM_DISK_CSV, os.path.join(BACKUP_DIR, backup_topo))
+                if os.path.exists(PERFORMANCE_CSV):
+                    shutil.copy2(PERFORMANCE_CSV, os.path.join(BACKUP_DIR, backup_perf))
             except Exception: pass
 
 # ==========================================
@@ -413,13 +645,23 @@ def serialize_graph(g_nx):
     edges = []
     for u, v, d in g_nx.edges(data=True):
         is_p = d.get('is_parent')
+        is_ai = d.get('is_ai_optimized', False)
+        is_v = d.get('is_virtual', False)
         cost = d.get('cost', '?')
-        label_text = f"{d.get('rssi')}dBm\nC: {cost}"
+        
+        rssi_val = d.get('rssi')
+        label_text = f"{rssi_val}dBm\nC: {cost}" if not is_v else f"VIRTUAL\nC: {cost}"
+        
+        # Color Logic:
+        # - AI Optimized & Parent: SPRING GREEN (#00FF7F)
+        # - Regular Parent: RED
+        # - Non-parent: GRAY
+        edge_color = "#00FF7F" if is_ai else ("#ff4d4d" if is_p else "gray")
         
         edges.append({
             "from": u, "to": v, "label": label_text, 
             "width": 3 if is_p else 1, "dashes": not is_p, 
-            "color": "red" if is_p else "gray", "physics": is_p
+            "color": edge_color, "physics": is_p
         })
     return {"nodes": nodes, "edges": edges}
 

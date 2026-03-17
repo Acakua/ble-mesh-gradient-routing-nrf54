@@ -298,10 +298,17 @@
 
                     newEdges.forEach(e => {
                         e.id = e.from + "-" + e.to;
-                        if (e.dashes) {
-                            e.color = { color: 'rgba(150, 150, 150, 0.15)', highlight: '#FFA500', hover: '#FFA500' };
-                        } else {
-                            e.color = { color: '#ff4d4d', highlight: '#00FFFF', hover: '#00FFFF' };
+                        // Use color from server if provided, otherwise fallback
+                        if (!e.color) {
+                            if (e.dashes) {
+                                e.color = { color: 'rgba(150, 150, 150, 0.15)', highlight: '#FFA500', hover: '#FFA500' };
+                            } else {
+                                e.color = { color: '#ff4d4d', highlight: '#00FFFF', hover: '#00FFFF' };
+                            }
+                        } else if (typeof e.color === 'string') {
+                            // If server sent a hex string, wrap it for Vis.js highlight support
+                            const baseColor = e.color;
+                            e.color = { color: baseColor, highlight: '#00FFFF', hover: '#00FFFF' };
                         }
                     });
 
