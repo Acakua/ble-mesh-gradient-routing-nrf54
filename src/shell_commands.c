@@ -902,10 +902,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
                   "Push Broadcast: mesh backprop_broadcast <hex>\n",
                   cmd_mesh_backprop_broadcast, 2, 0),
 
-    SHELL_CMD_ARG(backprop_broadcast, NULL,
-                  "Push Broadcast: mesh backprop_broadcast <hex>\n",
-                  cmd_mesh_backprop_broadcast, 2, 0),
-
     SHELL_CMD_ARG(sdn_reset, NULL, 
                   "Gui lenh RESET SDN cho toan mang (Chi Gateway)",
                   cmd_mesh_sdn_reset, 1, 0),
@@ -913,9 +909,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_SUBCMD_SET_END);
 
 /**
- * Đăng ký command chính "mesh"
+ * Dang ky command chinh "mesh"
  */
-                    "  mesh stats     - Thong ke goi tin TX\n"
-                    "  mesh topo_req  - Quet Topology toan mang\n"
-                    "  mesh sdn_reset - Reset SDN toan mang",
-                   NULL);
+SHELL_CMD_REGISTER(mesh, &mesh_cmds, "Bluetooth Mesh Commands", NULL);

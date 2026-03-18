@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(gradient_srv)
 
+# Workaround for NCS 3.0.1 build failure on nRF54L15
+# Ensures soc.c correctly identifies the Zephyr environment during TF-M build
+if(CONFIG_TF_M)
+	set(TFM_PLATFORM_EXT_CONFIG_FLAGS "-D__ZEPHYR__=1" CACHE STRING "TFM extra flags" FORCE)
+endif()
+
 # NORDIC SDK APP START
 target_sources(app PRIVATE
 	src/main.c
