@@ -4,3 +4,7 @@
 
 # build
 /build*/
+
+# Agent
+.agent/
+.gitnexus
