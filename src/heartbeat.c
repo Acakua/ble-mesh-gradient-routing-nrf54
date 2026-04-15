@@ -110,8 +110,9 @@ static void heartbeat_work_handler(struct k_work *work)
         LOG_ERR("[SensorData] TX Failed (err %d)", err);
     }
 
-    /* Reschedule with configured interval + small random jitter (0–5s) */
-    uint32_t jitter_ms = sys_rand32_get() % 5000;
+    /* Reschedule with configured interval + proportional jitter (max 2s or 50% of interval) */
+    uint32_t max_jitter_ms = (g_sensor_interval_ms / 2 < 2000) ? g_sensor_interval_ms / 2 : 2000;
+    uint32_t jitter_ms = sys_rand32_get() % (max_jitter_ms + 1);
     k_work_reschedule(&heartbeat_work, K_MSEC(g_sensor_interval_ms + jitter_ms));
 #endif
 }
@@ -234,7 +235,8 @@ void heartbeat_set_interval(uint32_t interval_sec)
 
     /* Apply immediately: reschedule next packet with new interval */
     if (heartbeat_started) {
-        uint32_t jitter = sys_rand32_get() % 1000;
+        uint32_t max_jitter_ms = (g_sensor_interval_ms / 4 < 1000) ? g_sensor_interval_ms / 4 : 1000;
+        uint32_t jitter = sys_rand32_get() % (max_jitter_ms + 1);
         k_work_reschedule(&heartbeat_work, K_MSEC(g_sensor_interval_ms + jitter));
     }
 #else
