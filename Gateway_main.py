@@ -578,7 +578,7 @@ def stress_processor_thread():
                             target_row[6] = rtt_val
                 continue # RTT_DATA chỉ để cập nhật Latency, không ghi dòng riêng
 
-            elif log_type == "HEARTBEAT" and len(parts) >= 5:
+            elif log_type == "SENSOR_DATA" and len(parts) >= 5:
                 src_hex = f"0x{safe_int_convert(parts[1]):04x}"
                 row[2] = src_hex
                 row[3] = f"0x{safe_int_convert(parts[2]):04x}"
@@ -707,6 +707,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     send_uart_command(f"mesh backprop {target} {led}")
                 elif action == "identify":
                     send_uart_command(f"mesh attention {target}")
+                elif action == "set_sensor_interval":
+                    interval = cmd.get("interval", 20)
+                    try:
+                        interval = int(interval)
+                        if 1 <= interval <= 65535:
+                            send_uart_command(f"mesh sensor_interval {target} {interval}")
+                        else:
+                            print(f"[WS] Invalid interval={interval}, must be 1-65535")
+                    except (ValueError, TypeError):
+                        print(f"[WS] Cannot parse interval: {interval}")
         except: pass
 
     async def broadcast_graph():

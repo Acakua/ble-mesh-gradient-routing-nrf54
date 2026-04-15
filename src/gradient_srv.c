@@ -7,6 +7,7 @@
 
 #include "data_forward.h"
 #include "gradient_work.h"
+#include "heartbeat.h"
 #include "led_indication.h"
 #include "neighbor_table.h"
 #include "packet_stats.h"
@@ -183,7 +184,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
   /* Logging Logic */
   if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
-    LOG_INF("[CONTROL - Heartbeat] Recv from 0x%04x (via 0x%04x), Hops: %d",
+    LOG_INF("[CONTROL - SensorData] Recv from 0x%04x (via 0x%04x), Hops: %d",
             original_source, sender_addr, hop_count);
   } else {
     LOG_INF("[DATA - Sensor] Recv from 0x%04x (via 0x%04x), Seq: %d, Hops: %d, "
@@ -211,7 +212,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
     if (pkt_stats_is_enabled()) {
       char csv_buf[128];
       if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
-        snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,HEARTBEAT,0x%04x,0x%04x,%d,%d",
+        snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,SENSOR_DATA,0x%04x,0x%04x,%d,%d",
                  original_source, sender_addr, hop_count, delay_ms);
         printk("%s\n", csv_buf);
       } else {
@@ -1366,6 +1367,91 @@ void topo_routing_init(struct bt_mesh_gradient_srv *srv) {
   }
 }
 
+/**
+ * @brief [NEW] Handle OP_SENSOR_INTERVAL — Gateway sets per-node sensor data interval.
+ *
+ * Message format (5 bytes):
+ *   dest_addr   (2B LE) — final destination; 0xFFFF = broadcast to all non-sink
+ *   interval_sec (2B LE) — new interval in seconds
+ *   ttl          (1B)   — remaining hops
+ *
+ * Routing logic mirrors BACKPROP_DATA:
+ *   - dest == 0xFFFF  → apply to self (if gradient != 0), done
+ *   - dest == my_addr → apply to self, done
+ *   - dest != my_addr → find nexthop via RRT, forward with TTL-1
+ */
+static int handle_sensor_interval(const struct bt_mesh_model *model,
+                                   struct bt_mesh_msg_ctx *ctx,
+                                   struct net_buf_simple *buf)
+{
+  struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+  uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+
+  /* Parse 5-byte payload */
+  uint16_t dest_addr   = net_buf_simple_pull_le16(buf);
+  uint16_t interval_sec = net_buf_simple_pull_le16(buf);
+  uint8_t  ttl          = net_buf_simple_pull_u8(buf);
+
+  LOG_INF("[SENSOR_INTERVAL] RX: dest=0x%04x, interval=%us, ttl=%u, from=0x%04x",
+          dest_addr, interval_sec, ttl, ctx->addr);
+
+  if (interval_sec == 0) {
+    LOG_WRN("[SENSOR_INTERVAL] Received invalid interval=0, ignoring");
+    return -EINVAL;
+  }
+
+  /* --- Broadcast mode: dest_addr == 0xFFFF --- */
+  if (dest_addr == BT_MESH_ADDR_ALL_NODES) {
+    if (srv->gradient != 0) {
+      /* Non-sink node: apply interval */
+      LOG_INF("[SENSOR_INTERVAL] Broadcast: applying interval=%us", interval_sec);
+      heartbeat_set_interval(interval_sec);
+    }
+    /* Broadcast flooding is handled by BLE Mesh network layer (TTL) — no manual relay */
+    return 0;
+  }
+
+  /* --- Unicast: am I the destination? --- */
+  if (dest_addr == my_addr) {
+    LOG_INF("[SENSOR_INTERVAL] Reached destination: applying interval=%us", interval_sec);
+    heartbeat_set_interval(interval_sec);
+    return 0;
+  }
+
+  /* --- Relay: forward hop-by-hop via RRT --- */
+  if (ttl <= 1) {
+    LOG_WRN("[SENSOR_INTERVAL] TTL exhausted, dropping for dest=0x%04x", dest_addr);
+    return 0;
+  }
+
+  uint16_t nexthop = rrt_find_nexthop(
+      srv->forwarding_table,
+      CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+      dest_addr);
+
+  if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+    LOG_WRN("[SENSOR_INTERVAL] No RRT route to dest=0x%04x", dest_addr);
+    return 0;
+  }
+
+  /* Re-pack and forward with TTL-1 */
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, 5);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL);
+  net_buf_simple_add_le16(&msg, dest_addr);
+  net_buf_simple_add_le16(&msg, interval_sec);
+  net_buf_simple_add_u8(&msg, ttl - 1);
+
+  struct bt_mesh_msg_ctx tx_ctx = {
+      .app_idx  = model->keys[0],
+      .addr     = nexthop,
+      .send_ttl = 0,
+      .send_rel = true,
+  };
+
+  LOG_INF("[SENSOR_INTERVAL] Relaying to nexthop=0x%04x (TTL %u→0)", nexthop, ttl - 1);
+  return srv_send_msg_with_stat(srv, &tx_ctx, &msg);
+}
+
 /******************************************************************************/
 /* Model Operations                                                           */
 /******************************************************************************/
@@ -1404,6 +1490,8 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
      handle_topo_rep},
     {BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, BT_MESH_LEN_MIN(5), /* 1B ID + at least 1 pair(4B) */
      handle_backprop_broadcast},
+    /* [NEW] Sensor Interval: Gateway sets per-node sensor data TX interval */
+    {BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, BT_MESH_LEN_EXACT(5), handle_sensor_interval},
     BT_MESH_MODEL_OP_END,
 };
 
@@ -1749,4 +1837,79 @@ int bt_mesh_gradient_srv_send_downlink_report(
   LOG_INF("Sending Downlink Report to 0x%04x (via 0x%04x), TX: %u", dest_addr,
           nexthop, total_tx);
   return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
+}
+
+/**
+ * @brief [NEW] Send OP_SENSOR_INTERVAL to set per-node sensor data interval.
+ *
+ * Unicast mode (dest_addr != 0xFFFF):
+ *   Looks up nexthop in RRT and sends hop-by-hop to destination.
+ *
+ * Broadcast mode (dest_addr == 0xFFFF):
+ *   Sends to BT_MESH_ADDR_ALL_NODES — BLE Mesh network layer handles flooding.
+ *   All non-sink nodes will apply the interval upon reception.
+ */
+int bt_mesh_gradient_srv_send_sensor_interval(
+    struct bt_mesh_gradient_srv *srv,
+    uint16_t dest_addr,
+    uint16_t interval_sec)
+{
+  if (interval_sec == 0) {
+    LOG_WRN("[SENSOR_INTERVAL] interval_sec cannot be 0");
+    return -EINVAL;
+  }
+
+  uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+
+  /* --- Broadcast mode: send to ALL_NODES --- */
+  if (dest_addr == BT_MESH_ADDR_ALL_NODES) {
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, 5);
+    bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL);
+    net_buf_simple_add_le16(&msg, BT_MESH_ADDR_ALL_NODES);
+    net_buf_simple_add_le16(&msg, interval_sec);
+    net_buf_simple_add_u8(&msg, BT_MESH_TTL_DEFAULT);
+
+    struct bt_mesh_msg_ctx ctx = {
+        .app_idx  = srv->model->keys[0],
+        .addr     = BT_MESH_ADDR_ALL_NODES,
+        .send_ttl = BT_MESH_TTL_DEFAULT,
+        .send_rel = false,
+    };
+
+    LOG_INF("[SENSOR_INTERVAL] Broadcast interval=%us to ALL_NODES", interval_sec);
+    return srv_send_msg_with_stat(srv, &ctx, &msg);
+  }
+
+  /* --- Unicast mode --- */
+  if (dest_addr == my_addr) {
+    LOG_WRN("[SENSOR_INTERVAL] Cannot send to self");
+    return -EINVAL;
+  }
+
+  uint16_t nexthop = rrt_find_nexthop(
+      srv->forwarding_table,
+      CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+      dest_addr);
+
+  if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+    LOG_WRN("[SENSOR_INTERVAL] No RRT route to 0x%04x", dest_addr);
+    return -ENETUNREACH;
+  }
+
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, 5);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL);
+  net_buf_simple_add_le16(&msg, dest_addr);
+  net_buf_simple_add_le16(&msg, interval_sec);
+  net_buf_simple_add_u8(&msg, BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL);
+
+  struct bt_mesh_msg_ctx ctx = {
+      .app_idx  = srv->model->keys[0],
+      .addr     = nexthop,
+      .send_ttl = 0,
+      .send_rel = true,
+  };
+
+  LOG_INF("[SENSOR_INTERVAL] Unicast interval=%us to 0x%04x via nexthop=0x%04x",
+          interval_sec, dest_addr, nexthop);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
 }

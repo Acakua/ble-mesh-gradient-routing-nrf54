@@ -67,6 +67,13 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST BT_MESH_MODEL_OP_3(0x16, \
                         BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
+/* [NEW] Sensor Interval opcode — Gateway → Node (unicast or broadcast) */
+/* Sets the periodic SENSOR_DATA transmission interval for a target node.  */
+/* Payload: dest_addr(2B LE) + interval_sec(2B LE) + ttl(1B) = 5 bytes     */
+/* dest_addr == 0xFFFF → broadcast to ALL non-sink nodes (no relay needed) */
+#define BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL BT_MESH_MODEL_OP_3(0x17, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE  1
 #define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE  64 /* Increased safety margin */
 #define BT_MESH_GRADIENT_SRV_DATA_MSG_LEN        7  /* Src(2)+Data(2)+TTL(1)+Hop(1)+MinRSSI(1) */
@@ -348,6 +355,26 @@ void topo_routing_init(struct bt_mesh_gradient_srv *srv);
  *  @retval 0 Successfully sent.
  */
 int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv, bool commit_flag);
+
+/** @brief [NEW] Send OP_SENSOR_INTERVAL command to set periodic data interval.
+ *
+ * Gateway-only function. Sends a command to update the SENSOR_DATA
+ * transmission interval of a target node via BACKPROP unicast routing (RRT).
+ *
+ * @param srv          Pointer to gradient server instance.
+ * @param dest_addr    Target node unicast address, OR 0xFFFF to broadcast
+ *                     to ALL non-sink nodes in the network.
+ * @param interval_sec New interval in seconds (1–65535). 0 is rejected.
+ *
+ * @retval 0              Successfully sent.
+ * @retval -EINVAL        interval_sec == 0, or dest_addr == own address.
+ * @retval -ENETUNREACH   No route to unicast destination in RRT.
+ * @retval -EAGAIN        Device not provisioned.
+ */
+int bt_mesh_gradient_srv_send_sensor_interval(
+    struct bt_mesh_gradient_srv *srv,
+    uint16_t dest_addr,
+    uint16_t interval_sec);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

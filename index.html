@@ -154,6 +154,98 @@
             background: #444;
             margin: 5px 0;
         }
+
+        /* ========================
+           Sensor Interval Modal
+           ======================== */
+        #interval-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            z-index: 2000;
+            justify-content: center;
+            align-items: center;
+            backdrop-filter: blur(3px);
+        }
+        #interval-modal.show { display: flex; }
+
+        #interval-card {
+            background: #1a1a2e;
+            border: 1px solid #4db8ff;
+            border-radius: 14px;
+            padding: 28px 32px;
+            min-width: 320px;
+            max-width: 420px;
+            box-shadow: 0 8px 40px rgba(77, 184, 255, 0.2);
+            animation: modalIn 0.18s ease;
+        }
+        @keyframes modalIn {
+            from { opacity: 0; transform: translateY(-12px) scale(0.97); }
+            to   { opacity: 1; transform: translateY(0)   scale(1);    }
+        }
+
+        #interval-card h3 {
+            margin: 0 0 18px 0;
+            color: #4db8ff;
+            font-size: 1rem;
+            letter-spacing: 0.5px;
+        }
+
+        #interval-input {
+            width: 100%;
+            padding: 11px 14px;
+            background: #252540;
+            border: 1.5px solid #555;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 1.15rem;
+            box-sizing: border-box;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        #interval-input:focus {
+            border-color: #4db8ff;
+            box-shadow: 0 0 0 3px rgba(77, 184, 255, 0.15);
+        }
+        #interval-input.error { border-color: #f44336 !important; }
+
+        .modal-hint {
+            margin: 8px 0 22px;
+            color: #777;
+            font-size: 0.8rem;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+        .btn-apply {
+            padding: 9px 24px;
+            background: #4db8ff;
+            color: #000;
+            border: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+        .btn-apply:hover  { background: #7dcfff; }
+        .btn-apply:active { transform: scale(0.97); }
+        .btn-cancel {
+            padding: 9px 18px;
+            background: transparent;
+            color: #999;
+            border: 1.5px solid #555;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: border-color 0.2s, color 0.2s;
+        }
+        .btn-cancel:hover { border-color: #f44336; color: #f44336; }
     </style>
 </head>
 
@@ -178,6 +270,25 @@
                 <div class="menu-item" onclick="sendCmd('toggle', 0)">Toggle LED 1</div>
                 <div class="menu-item" onclick="sendCmd('toggle', 1)">Toggle LED 2</div>
                 <div class="menu-item" onclick="sendCmd('toggle', 3)">Toggle LED 4</div>
+            </div>
+        </div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" onclick="openIntervalModal()">⏱ Set Sensor Interval...</div>
+    </div>
+
+    <!-- Sensor Interval Modal Dialog -->
+    <div id="interval-modal" role="dialog" aria-modal="true" aria-labelledby="interval-modal-title">
+        <div id="interval-card">
+            <h3 id="interval-modal-title">⏱ Set Sensor Interval</h3>
+            <input id="interval-input"
+                   type="number" min="1" max="65535"
+                   placeholder="20"
+                   autocomplete="off"
+                   aria-label="Interval in seconds">
+            <p class="modal-hint">Nhập thời gian giữa các lần gửi (giây).&nbsp; Mặc định: 20s &nbsp;|&nbsp; Tối đa: 65535s</p>
+            <div class="modal-actions">
+                <button id="btn-cancel-interval" class="btn-cancel" onclick="closeIntervalModal()">Hủy</button>
+                <button id="btn-apply-interval"  class="btn-apply" onclick="applyInterval()">✔ Áp dụng</button>
             </div>
         </div>
     </div>
@@ -258,6 +369,56 @@
             ws.send(JSON.stringify(payload));
             document.getElementById("context-menu").style.display = "none";
         }
+
+        /* ================================================
+           Sensor Interval Modal Functions
+           ================================================ */
+
+        function openIntervalModal() {
+            document.getElementById('context-menu').style.display = 'none';
+            if (!selectedNodeId) return;
+            document.getElementById('interval-modal-title').textContent =
+                `\u23F1 Set Sensor Interval \u2014 Node 0x${selectedNodeId}`;
+            const input = document.getElementById('interval-input');
+            input.value = '';
+            input.classList.remove('error');
+            document.getElementById('interval-modal').classList.add('show');
+            setTimeout(() => input.focus(), 80); // Wait for animation
+        }
+
+        function closeIntervalModal() {
+            document.getElementById('interval-modal').classList.remove('show');
+        }
+
+        function applyInterval() {
+            const input = document.getElementById('interval-input');
+            const val = parseInt(input.value, 10);
+            if (isNaN(val) || val < 1 || val > 65535) {
+                input.classList.add('error');
+                input.focus();
+                return;
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN || !selectedNodeId) return;
+            ws.send(JSON.stringify({
+                action: 'set_sensor_interval',
+                target: selectedNodeId,
+                interval: val
+            }));
+            closeIntervalModal();
+        }
+
+        /* Keyboard shortcuts for modal */
+        document.getElementById('interval-input').addEventListener('keydown', function(e) {
+            this.classList.remove('error');
+            if (e.key === 'Enter')  applyInterval();
+            if (e.key === 'Escape') closeIntervalModal();
+        });
+
+        /* Click outside card to close */
+        document.getElementById('interval-modal').addEventListener('click', function(e) {
+            if (e.target === this) closeIntervalModal();
+        });
+        /* ================================================ */
 
         var ws;
         function connect() {

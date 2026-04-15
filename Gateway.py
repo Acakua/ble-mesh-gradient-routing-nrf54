@@ -7,12 +7,21 @@ import json
 import csv
 import shutil
 import os
+import sys
 import networkx as nx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 import uvicorn
 import asyncio
 import datetime
+
+# Fix Unicode output on Windows console (CP1252 -> UTF-8)
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # ==========================================
 # CẤU HÌNH HỆ THỐNG & ĐỊNH DANH PHIÊN (SESSION)
@@ -27,7 +36,7 @@ GATEWAY_NODE = "0002"
 SESSION_ID = time.strftime("%Y%m%d_%H%M%S")
 
 if os.name == 'nt':  
-    SERIAL_PORT = r'\\.\COM32' 
+    SERIAL_PORT = r'\\.\COM25' 
     RAM_DISK_CSV = f'GRADIENT_topo_log_{SESSION_ID}.csv' 
     BACKUP_DIR = 'wsn_backup\\' 
 else:                
@@ -81,7 +90,7 @@ def init_serial():
         print(f"--- SESSION STARTED: {SESSION_ID} (Gradient Mode) ---")
         print(f"[Hệ Thống] Đã kết nối cổng: {SERIAL_PORT}")
     except Exception as e:
-        print(f"[LỖI CHÍ MẠNG] Serial Error: {e}")
+        print(f"[FATAL] Serial Error: {e}")
         os._exit(1)
 
 # ==========================================
@@ -398,7 +407,7 @@ def stress_processor_thread():
                             target_row[6] = rtt_val
                 continue
 
-            elif log_type == "HEARTBEAT" and len(parts) >= 5:
+            elif log_type == "SENSOR_DATA" and len(parts) >= 5:
                 src_hex = f"0x{safe_int_convert(parts[1]):04x}"
                 row[2] = src_hex
                 row[3] = f"0x{safe_int_convert(parts[2]):04x}"
@@ -508,6 +517,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     send_uart_command(f"mesh backprop {target} {led}")
                 elif action == "identify":
                     send_uart_command(f"mesh attention {target}")
+                elif action == "set_sensor_interval":
+                    interval = cmd.get("interval", 20)
+                    try:
+                        interval = int(interval)
+                        if 1 <= interval <= 65535:
+                            send_uart_command(f"mesh sensor_interval {target} {interval}")
+                        else:
+                            print(f"[WS] Invalid interval={interval}, must be 1-65535")
+                    except (ValueError, TypeError):
+                        print(f"[WS] Cannot parse interval: {interval}")
         except: pass
 
     async def broadcast_graph():

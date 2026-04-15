@@ -542,29 +542,148 @@ static int cmd_mesh_heartbeat(const struct shell *sh, size_t argc,
   ARG_UNUSED(argv);
 
   shell_print(sh, "");
-  shell_print(sh, "=== Trang Thai Heartbeat ===");
+  shell_print(sh, "=== Trang Thai Sensor Data ===");
 
 #ifdef CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_ENABLED
-  shell_print(sh, "Config   : ENABLED");
-  shell_print(sh, "Interval : %d giay",
-              CONFIG_BT_MESH_GRADIENT_SRV_HEARTBEAT_INTERVAL_SEC);
-  shell_print(sh, "Active   : %s", heartbeat_is_active() ? "YES" : "NO");
+  shell_print(sh, "Config    : ENABLED");
+  uint32_t interval_ms = heartbeat_get_interval_ms();
+  shell_print(sh, "Interval  : %u giay (%u ms)", interval_ms / 1000, interval_ms);
+  shell_print(sh, "Active    : %s", heartbeat_is_active() ? "YES" : "NO");
 
   if (gradient_srv.gradient == 0) {
-    shell_print(sh, "Ghi chu  : Gateway khong gui heartbeat");
+    shell_print(sh, "Ghi chu   : Gateway khong gui sensor data");
   }
 #else
   shell_print(sh, "Config   : DISABLED");
 #endif
 
-  shell_print(sh, "============================");
+  shell_print(sh, "==============================");
 
   return 0;
 }
 
 /*============================================================================*/
-/*                         Command: mesh report stop                          */
+/*                 Command: mesh sensor_interval (unicast)                    */
 /*============================================================================*/
+
+/**
+ * @brief Set sensor data interval for a specific node (unicast via RRT)
+ *
+ * Lenh: mesh sensor_interval <dest_addr_hex> <interval_sec>
+ *
+ * Tham so:
+ *   - dest_addr_hex: Dia chi node dich (hex, vi du: 000A)
+ *   - interval_sec : Khoang cach gui goi tin (giay, 1-65535)
+ *
+ * Vi du: mesh sensor_interval 000A 30   # Set node 0x000A gui moi 30 giay
+ */
+static int cmd_mesh_sensor_interval(const struct shell *sh, size_t argc, char **argv) {
+  if (argc != 3) {
+    shell_error(sh, "Sai cu phap!");
+    shell_print(sh, "Dung: mesh sensor_interval <dest_hex> <interval_sec>");
+    shell_print(sh, "Vi du: mesh sensor_interval 000A 30");
+    return -EINVAL;
+  }
+
+  if (!check_provisioned(sh)) {
+    return -ENOEXEC;
+  }
+
+  if (gradient_srv.gradient != 0) {
+    shell_error(sh, "Chi Gateway (gradient=0) moi co the gui SENSOR_INTERVAL!");
+    return -ENOEXEC;
+  }
+
+  /* Parse destination address (hex) */
+  char *endptr;
+  unsigned long dest_addr = strtoul(argv[1], &endptr, 16);
+  if (*endptr != '\0' || dest_addr > 0xFFFF) {
+    shell_error(sh, "Dia chi khong hop le: %s", argv[1]);
+    return -EINVAL;
+  }
+
+  /* Parse interval (decimal seconds) */
+  unsigned long interval_sec = strtoul(argv[2], &endptr, 0);
+  if (*endptr != '\0' || interval_sec == 0 || interval_sec > 65535) {
+    shell_error(sh, "Interval khong hop le: %s (phai tu 1 den 65535)", argv[2]);
+    return -EINVAL;
+  }
+
+  shell_print(sh, "");
+  shell_print(sh, "Gui SENSOR_INTERVAL %lu giay den node 0x%04x...",
+              interval_sec, (uint16_t)dest_addr);
+
+  int err = bt_mesh_gradient_srv_send_sensor_interval(
+      &gradient_srv, (uint16_t)dest_addr, (uint16_t)interval_sec);
+
+  if (err == 0) {
+    shell_print(sh, "SENSOR_INTERVAL da gui thanh cong!");
+  } else if (err == -ENETUNREACH) {
+    shell_error(sh, "Khong tim thay route den 0x%04x!", (uint16_t)dest_addr);
+    shell_print(sh, "Dung 'mesh dest' de xem danh sach destination.");
+  } else if (err == -EINVAL) {
+    shell_error(sh, "Tham so khong hop le (interval=0 hoac gui den chinh minh)");
+  } else {
+    shell_error(sh, "Gui that bai, err=%d", err);
+  }
+
+  return err;
+}
+
+/*============================================================================*/
+/*                 Command: mesh sensor_interval_all (broadcast)              */
+/*============================================================================*/
+
+/**
+ * @brief Broadcast sensor data interval to ALL nodes in the network
+ *
+ * Lenh: mesh sensor_interval_all <interval_sec>
+ *
+ * Tham so:
+ *   - interval_sec: Khoang cach gui goi tin (giay, 1-65535)
+ *
+ * Vi du: mesh sensor_interval_all 60   # Toan mang gui moi 60 giay
+ */
+static int cmd_mesh_sensor_interval_all(const struct shell *sh, size_t argc, char **argv) {
+  if (argc != 2) {
+    shell_error(sh, "Sai cu phap!");
+    shell_print(sh, "Dung: mesh sensor_interval_all <interval_sec>");
+    shell_print(sh, "Vi du: mesh sensor_interval_all 60");
+    return -EINVAL;
+  }
+
+  if (!check_provisioned(sh)) {
+    return -ENOEXEC;
+  }
+
+  if (gradient_srv.gradient != 0) {
+    shell_error(sh, "Chi Gateway (gradient=0) moi co the gui SENSOR_INTERVAL!");
+    return -ENOEXEC;
+  }
+
+  char *endptr;
+  unsigned long interval_sec = strtoul(argv[1], &endptr, 0);
+  if (*endptr != '\0' || interval_sec == 0 || interval_sec > 65535) {
+    shell_error(sh, "Interval khong hop le: %s (phai tu 1 den 65535)", argv[1]);
+    return -EINVAL;
+  }
+
+  shell_print(sh, "");
+  shell_print(sh, "Broadcast SENSOR_INTERVAL %lu giay cho TOAN BO MANG...", interval_sec);
+
+  int err = bt_mesh_gradient_srv_send_sensor_interval(
+      &gradient_srv, BT_MESH_ADDR_ALL_NODES, (uint16_t)interval_sec);
+
+  if (err == 0) {
+    shell_print(sh, "SENSOR_INTERVAL broadcast thanh cong! Tat ca node se cap nhat sau it phut.");
+  } else {
+    shell_error(sh, "Gui that bai, err=%d", err);
+  }
+
+  return err;
+}
+
+
 
 /**
  * @brief Điều khiển bài test (Start/Stop)
@@ -884,8 +1003,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
                   "  Vi du: mesh data 456",
                   cmd_mesh_data, 2, 0),
 
-    SHELL_CMD_ARG(heartbeat, NULL, "Hien thi trang thai heartbeat",
+    SHELL_CMD_ARG(heartbeat, NULL, "Hien thi trang thai sensor data (interval hien tai)",
                   cmd_mesh_heartbeat, 1, 0),
+
+    SHELL_CMD_ARG(sensor_interval, NULL,
+                  "Set interval cho 1 node: mesh sensor_interval <dest_hex> <sec>\n"
+                  "  Vi du: mesh sensor_interval 000A 30",
+                  cmd_mesh_sensor_interval, 3, 0),
+
+    SHELL_CMD_ARG(sensor_interval_all, NULL,
+                  "Broadcast interval cho toan mang: mesh sensor_interval_all <sec>\n"
+                  "  Vi du: mesh sensor_interval_all 60",
+                  cmd_mesh_sensor_interval_all, 2, 0),
 
     SHELL_CMD_ARG(stress_dl, NULL, "Chay Stress Test DL: mesh stress_dl <addr>",
                   cmd_mesh_stress_dl, 2, 0),
