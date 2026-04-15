@@ -562,9 +562,11 @@ static int handle_test_start(const struct bt_mesh_model *model,
   /* 3. Cập nhật trạng thái để không xử lý lại */
   last_processed_test_id = received_test_id;
 
+  uint16_t interval_ms = (buf->len >= 2) ? net_buf_simple_pull_le16(buf) : 2000;
+
   /* 4. Notify application to start sending */
   if (srv->handlers->test_start_received) {
-    srv->handlers->test_start_received(srv);
+    srv->handlers->test_start_received(srv, interval_ms);
   }
 
   /* 5. Re-broadcast (Controlled Flooding) */
@@ -575,9 +577,10 @@ static int handle_test_start(const struct bt_mesh_model *model,
 
     LOG_DBG("Re-broadcasting TEST START ID %d...", received_test_id);
 
-    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 1);
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 3);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TEST_START);
     net_buf_simple_add_u8(&msg, received_test_id);
+    net_buf_simple_add_le16(&msg, interval_ms);
 
     struct bt_mesh_msg_ctx send_ctx = {
         .app_idx = model->keys[0],
@@ -1767,30 +1770,28 @@ int bt_mesh_gradient_srv_send_report_req(
   return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
 
-/**
- * @brief [UPDATED] Gửi lệnh TEST START xuống toàn mạng (Controlled Flooding)
- */
-int bt_mesh_gradient_srv_send_test_start(
-    struct bt_mesh_gradient_srv *gradient_srv, bool force_new_id) {
-  /* 1. Tăng ID cho lần gửi mới nếu được yêu cầu */
-  if (force_new_id) {
-    current_tx_test_id++;
-  }
+int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *srv, bool force_new_id, uint16_t interval_ms)
+{
+	struct bt_mesh_msg_ctx ctx = {
+		.app_idx = srv->model->keys[0],
+		.addr = BT_MESH_ADDR_ALL_NODES,
+		.send_ttl = BT_MESH_GRADIENT_SRV_DEFAULT_TTL,
+	};
 
-  /* 2. Tạo gói tin có payload là Test ID (1 byte) */
-  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 1);
-  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TEST_START);
-  net_buf_simple_add_u8(&msg, current_tx_test_id);
+	BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 3);
+	bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TEST_START);
 
-  /* 3. Gửi Broadcast với TTL mặc định */
-  struct bt_mesh_msg_ctx ctx = {
-      .app_idx = gradient_srv->model->keys[0],
-      .addr = BT_MESH_ADDR_ALL_NODES,
-      .send_ttl = BT_MESH_TTL_DEFAULT,
-  };
+	if (force_new_id) {
+		current_tx_test_id++;
+		if (current_tx_test_id == 0xFF) {
+			current_tx_test_id = 0;
+		}
+	}
 
-  LOG_INF(">>> BROADCASTING TEST START (ID: %d) <<<", current_tx_test_id);
-  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
+	net_buf_simple_add_u8(&msg, current_tx_test_id);
+	net_buf_simple_add_le16(&msg, interval_ms);
+
+	return srv_send_msg_with_stat(srv, &ctx, &msg);
 }
 
 /**

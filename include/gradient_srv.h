@@ -147,9 +147,10 @@ struct bt_mesh_gradient_srv_handlers {
      *
      * The application should handle this by starting the periodic data transmission.
      *
-     * @param[in] srv Gradient server instance.
+     * @param[in] srv      Gradient server instance.
+     * @param[in] interval Packet interval in milliseconds.
      */
-    void (*const test_start_received)(struct bt_mesh_gradient_srv *srv);
+    void (*const test_start_received)(struct bt_mesh_gradient_srv *srv, uint16_t interval);
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -307,7 +308,7 @@ int bt_mesh_gradient_srv_send_report_req(struct bt_mesh_gradient_srv *gradient_s
  *                     If false, re-uses the current ID for reliable re-transmission.
  * @retval 0 Successfully sent.
  */
-int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *gradient_srv, bool force_new_id);
+int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *srv, bool force_new_id, uint16_t interval_ms);
 
 /** @brief [NEW] Send a REPORT RESPONSE (Unicast) to the Sink.
  *

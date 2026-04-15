@@ -700,10 +700,20 @@ static int cmd_mesh_report_stop(const struct shell *sh, size_t argc,
     shell_print(sh, "Dang dung test qua Sink Control...");
     sink_stop_test();
   } else if (strcmp(argv[1], "start") == 0) {
-    shell_print(sh, "Dang bat dau test qua Sink Control...");
-    sink_start_test();
+    uint32_t duration_sec = 300; // Default 5 mins
+    uint32_t interval_ms = 2000; // Default 2s
+
+    if (argc >= 3) {
+      duration_sec = strtoul(argv[2], NULL, 10);
+    }
+    if (argc >= 4) {
+      interval_ms = strtoul(argv[3], NULL, 10);
+    }
+
+    shell_print(sh, "Bat dau test: %d s, Interval %d ms", duration_sec, interval_ms);
+    sink_start_test(duration_sec * 1000, (uint16_t)interval_ms);
   } else {
-    shell_print(sh, "Lenh khong hop le. Su dung: start | stop");
+    shell_print(sh, "Su dung: mesh report <start|stop> [duration_sec] [interval_ms]");
   }
 
   return 0;
@@ -996,7 +1006,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_CMD_ARG(report, NULL,
                   "Dieu khien bao cao: mesh report stop\n"
                   "  stop: Dung test va yeu cau bao cao tu tat ca node",
-                  cmd_mesh_report_stop, 2, 0),
+                  cmd_mesh_report_stop, 2, 2),
 
     SHELL_CMD_ARG(data, NULL,
                   "Gui DATA len Gateway: mesh data <payload>\n"

@@ -31,12 +31,12 @@ POLLING_INTERVAL = 60
 COLLECTION_WINDOW = 30 
 PAGE_TIMEOUT = 4 
 BACKUP_INTERVAL = 300 
-GATEWAY_NODE = "0002" 
+GATEWAY_NODE = "0007" 
 
 SESSION_ID = time.strftime("%Y%m%d_%H%M%S")
 
 if os.name == 'nt':  
-    SERIAL_PORT = r'\\.\COM25' 
+    SERIAL_PORT = r'\\.\COM26' 
     RAM_DISK_CSV = f'GRADIENT_topo_log_{SESSION_ID}.csv' 
     BACKUP_DIR = 'wsn_backup\\' 
 else:                
@@ -156,7 +156,7 @@ def send_uart_command(cmd):
                 global_ser.write(f"{cmd}\r\n".encode())
                 global_ser.flush() 
                 time.sleep(0.05) 
-            print(f"[UART TX] Đã nã lệnh: {cmd}")
+            print(f"[UART TX] Đã gửi lệnh: {cmd}")
         except Exception as e:
             print(f"[UART TX] Lỗi: {e}")
 
@@ -231,16 +231,20 @@ def commit_topology_to_temp(origin):
         "drp": data['drp'],
         "fwdr": data['fwdr'],
         "drop_rate": drop_rate,
-        "pin": pin_est
+        "pin": pin_est,
+        "uptime": data['uptime']
     }
 
 def reconcile_master_graph():
     global Master_Graph, latest_graph_json, missed_count_dict
     with graph_lock:
+        if not Master_Graph.has_node(GATEWAY_NODE):
+            Master_Graph.add_node(GATEWAY_NODE, grad=0, color="red", drp=0, fwdr=0, drop_rate=0.0, pin=100.0)
+
         for node, data in current_cycle_data.items():
             missed_count_dict[node] = 0
             
-            Master_Graph.add_node(node, grad=data["grad"], color="green", drp=data["drp"], fwdr=data["fwdr"], drop_rate=data["drop_rate"], pin=data["pin"])
+            Master_Graph.add_node(node, grad=data["grad"], color="green", drp=data["drp"], fwdr=data["fwdr"], drop_rate=data["drop_rate"], pin=data["pin"], uptime=data.get("uptime", 0))
             # Fix lint: force edges() to be list or iterable
             edges_to_remove = [(u, v) for u, v in list(Master_Graph.edges()) if u == node]
             Master_Graph.remove_edges_from(edges_to_remove)
@@ -465,28 +469,54 @@ def serialize_graph(g_nx):
     nodes = []
     for n, d in g_nx.nodes(data=True):
         is_gw = (n == GATEWAY_NODE)
-        tooltip_html = f"<b>Node: {n}</b><br>Gradient: {d.get('grad', '?')}<br>Mất gói: {d.get('drop_rate', 0.0)}%<br>Pin: {d.get('pin', '?')}%"
-        if is_gw: tooltip_html = "<b>GATEWAY</b>"
-        
+        grad_val = d.get('grad', 0 if is_gw else None)
+        drop  = d.get('drop_rate', 0.0)
+        pin   = d.get('pin', '?')
+        rssi_min = d.get('rssi_min', '?')
+        hop   = d.get('hop', grad_val)
+        uptime = d.get('uptime', '?')
+
+        tooltip_lines = [
+            f"Node:    {n}",
+            f"Gradient:{grad_val}",
+            f"RSSI:    {rssi_min} dBm" if rssi_min != '?' else "RSSI:    —",
+            f"Drop:    {drop}%",
+            f"Battery: {pin}%",
+            f"Uptime:  {uptime}s",
+        ]
+        tooltip_html = "\n".join(tooltip_lines)
+        if is_gw:
+            tooltip_html = "GATEWAY (Sink)\nGradient: 0"
+
         nodes.append({
-            "id": n, 
-            "label": f"Node {n}\n(Grad: {d.get('grad', 0 if is_gw else '?')})", 
-            "color": "red" if is_gw else d.get('color', 'blue'),
-            "level": 0 if is_gw else (int(d.get('grad', 3)) if str(d.get('grad')).isdigit() else 3),
-            "title": tooltip_html 
+            "id":       n,
+            "label":    f"{n}\nG:{grad_val}",
+            "gradient": int(grad_val) if grad_val is not None and str(grad_val).isdigit() else 0,
+            "drop_rate": drop,
+            "pin":      pin,
+            "uptime":   uptime,
+            "rssi":     rssi_min,
+            "hop":      hop,
+            "age":      d.get('link_age', None),
+            "level":    0 if is_gw else (int(grad_val) if str(grad_val).isdigit() else 3),
+            "title":    tooltip_html,
         })
-    
+
     edges = []
     for u, v, d in g_nx.edges(data=True):
         is_p = d.get('is_parent')
         is_v = d.get('is_virtual', False)
         cost = d.get('cost', '?')
-        label_text = f"{d.get('rssi')}dBm\nC: {cost}" if not is_v else f"VIRTUAL\nC: {cost}"
-        
+        rssi = d.get('rssi', '')
+        label_text = f"{rssi}dBm\nC:{cost}" if not is_v else f"VIR\nC:{cost}"
+
         edges.append({
-            "from": u, "to": v, "label": label_text, 
-            "width": 3 if is_p else 1, "dashes": not is_p, 
-            "color": "#ff4d4d" if is_p else "gray", 
+            "from":   u,
+            "to":     v,
+            "label":  label_text,
+            "width":  3 if is_p else 1,
+            "dashes": not is_p,
+            "color":  "#00D4FF" if is_p else "#3A5570",
             "physics": is_p
         })
     return {"nodes": nodes, "edges": edges}
@@ -511,36 +541,108 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
             while True:
                 data = await websocket.receive_text()
-                cmd = json.loads(data)
-                target, action, led = cmd.get("target"), cmd.get("action"), cmd.get("led")
-                if action == "toggle":
-                    send_uart_command(f"mesh backprop {target} {led}")
-                elif action == "identify":
-                    send_uart_command(f"mesh attention {target}")
+                cmd    = json.loads(data)
+                action = cmd.get("action", "")
+                target = cmd.get("target", "")
+
+                # ── Topology / Network ──────────────────────────────────
+                if action == "topo_req":
+                    send_uart_command("mesh topo_req 0")
+
+                elif action == "sdn_reset":
+                    send_uart_command("mesh sdn_reset")
+
+                # ── Sensor Interval ─────────────────────────────────────
                 elif action == "set_sensor_interval":
-                    interval = cmd.get("interval", 20)
                     try:
-                        interval = int(interval)
-                        if 1 <= interval <= 65535:
+                        interval = int(cmd.get("interval", 20))
+                        if 1 <= interval <= 65535 and target:
                             send_uart_command(f"mesh sensor_interval {target} {interval}")
                         else:
-                            print(f"[WS] Invalid interval={interval}, must be 1-65535")
-                    except (ValueError, TypeError):
-                        print(f"[WS] Cannot parse interval: {interval}")
-        except: pass
+                            print(f"[WS] Invalid sensor_interval params: target={target} interval={interval}")
+                    except (ValueError, TypeError) as e:
+                        print(f"[WS] sensor_interval parse error: {e}")
+
+                elif action == "sensor_interval_all":
+                    try:
+                        interval = int(cmd.get("interval", 20))
+                        if 1 <= interval <= 65535:
+                            send_uart_command(f"mesh sensor_interval_all {interval}")
+                        else:
+                            print(f"[WS] Invalid sensor_interval_all: {interval}")
+                    except (ValueError, TypeError) as e:
+                        print(f"[WS] sensor_interval_all parse error: {e}")
+
+                # ── Stress Test ─────────────────────────────────────────
+                elif action == "report_start":
+                    dur = cmd.get("duration", 300) # Default 5 mins
+                    freq = cmd.get("interval", 2000) # Default 2s
+                    send_uart_command(f"mesh report start {dur} {freq}")
+
+                elif action == "report_stop":
+                    send_uart_command("mesh report stop")
+
+                elif action == "stress_dl":
+                    if target:
+                        send_uart_command(f"mesh stress_dl {target}")
+
+                # ── Node Controls ────────────────────────────────────────
+                elif action == "attention" or action == "identify":
+                    if target:
+                        send_uart_command(f"mesh attention {target}")
+
+                elif action == "backprop":
+                    try:
+                        payload = int(cmd.get("payload", 0))
+                        if target and 0 <= payload <= 65535:
+                            send_uart_command(f"mesh backprop {target} {payload}")
+                        else:
+                            print(f"[WS] Invalid backprop params: target={target} payload={payload}")
+                    except (ValueError, TypeError) as e:
+                        print(f"[WS] backprop parse error: {e}")
+
+                elif action == "toggle":
+                    # Legacy: map led toggle to backprop
+                    led = cmd.get("led")
+                    if target and led is not None:
+                        send_uart_command(f"mesh backprop {target} {led}")
+
+                # ── Stats ────────────────────────────────────────────────
+                elif action == "stats_reset":
+                    send_uart_command("mesh stats reset")
+
+                elif action == "get_stats":
+                    # Stats are read from firmware via UART — just request it
+                    send_uart_command("mesh stats")
+
+                else:
+                    print(f"[WS] Unknown action: {action}")
+
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            print(f"[WS] listen_for_commands error: {e}")
 
     async def broadcast_graph():
         last_sent = ""
-        try:
-            while True:
-                if latest_graph_json != last_sent and latest_graph_json != "":
-                    await websocket.send_text(latest_graph_json)
-                    last_sent = latest_graph_json
-                await asyncio.sleep(0.5)
-        except: pass
+        while True:
+            try:
+                # Use a local copy of latest_graph_json to avoid race conditions
+                current_data = latest_graph_json 
+                if current_data != last_sent and current_data != "":
+                    # Check if the connection is still alive before sending
+                    await websocket.send_text(current_data)
+                    last_sent = current_data
+            except Exception:
+                # If send fails, the connection might be closed; exit the loop
+                break
+            await asyncio.sleep(0.5)
 
-    await asyncio.gather(listen_for_commands(), broadcast_graph())
-    ws_clients.remove(websocket)
+    try:
+        await asyncio.gather(listen_for_commands(), broadcast_graph())
+    finally:
+        if websocket in ws_clients:
+            ws_clients.remove(websocket)
 
 if __name__ == "__main__":
     init_serial() 

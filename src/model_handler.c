@@ -30,12 +30,9 @@ LOG_MODULE_REGISTER(model_handler, LOG_LEVEL_INF);
 /* ==========================================
  * CẤU HÌNH TEST (TEST CONFIGURATION)
  * ========================================== */
-// 1. Cấu hình thời gian chạy test (1 phút)
-#define TEST_DURATION_MINUTES 45  
-#define TEST_DURATION_MS (TEST_DURATION_MINUTES * 60 * 1000)
-
-// 2. Cấu hình cho Sensor Node (Tần suất gửi tin)
-#define SENSOR_SEND_INTERVAL_MS 2000
+// Global variables to store test settings
+static uint32_t g_test_duration_ms = (45 * 60 * 1000); // 45 mins default
+static uint16_t g_test_interval_ms = 2000;            // 2s default
 
 /* ==========================================
  * GLOBALS & WORK ITEMS
@@ -160,12 +157,13 @@ static void handle_data_received(struct bt_mesh_gradient_srv *srv,
 }
 
 /* [SENSOR] Xử lý khi nhận lệnh TEST START từ Sink */
-static void handle_test_start_received(struct bt_mesh_gradient_srv *srv) {
+static void handle_test_start_received(struct bt_mesh_gradient_srv *srv, uint16_t interval) {
   /* Node Sink không xử lý lệnh của chính mình */
   if (srv->gradient == 0)
     return;
 
-  LOG_INF(">> EVENT: START COMMAND RECEIVED FROM SINK <<");
+  LOG_INF(">> TEST START message received! (Interval: %u ms) <<", interval);
+  g_test_interval_ms = interval;
 
   /* 0. Bật thống kê gói tin */
   pkt_stats_set_enabled(true);
@@ -320,34 +318,35 @@ const struct bt_mesh_comp *model_handler_init(void) {
 /* -------------------------------------------------------------------------
  * HELPER FUNCTIONS (SINK CONTROL)
  * ------------------------------------------------------------------------- */
-void sink_start_test(void) {
+void sink_start_test(uint32_t duration_ms, uint16_t interval_ms) {
   if (is_test_running)
     return;
 
-  LOG_INF("\n>>> SINK: STARTING AUTO TEST (Duration: %d ms) <<<",
-          TEST_DURATION_MS);
+  g_test_duration_ms = duration_ms;
+  g_test_interval_ms = interval_ms;
+
+  LOG_INF("\n>>> SINK: STARTING AUTO TEST (Duration: %d ms, Interval: %d ms) <<<",
+          g_test_duration_ms, g_test_interval_ms);
 
   /* 0. Bật thống kê gói tin */
   pkt_stats_set_enabled(true);
 
-  /* 1. Broadcast lệnh START (Gửi 3 lần với CÙNG ID để đảm bảo độ tin cậy) */
+  /* 1. Broadcast lệnh START */
   pkt_stats_reset();
   g_test_start_time = k_uptime_get_32();
-  // Phát lần đầu với force_new_id = true để tăng ID máy phát
-  bt_mesh_gradient_srv_send_test_start(&gradient_srv, true);
+  bt_mesh_gradient_srv_send_test_start(&gradient_srv, true, g_test_interval_ms);
 
-  // Hai lần sau phát lại với cùng ID đó (force_new_id = false)
   for (int i = 0; i < 2; i++) {
     k_sleep(K_MSEC(20));
-    bt_mesh_gradient_srv_send_test_start(&gradient_srv, false);
+    bt_mesh_gradient_srv_send_test_start(&gradient_srv, false, g_test_interval_ms);
   }
 
   /* 2. Cài đặt Timer tự động dừng */
-  k_work_schedule(&auto_stop_work, K_MSEC(TEST_DURATION_MS));
+  k_work_schedule(&auto_stop_work, K_MSEC(g_test_duration_ms));
   is_test_running = true;
 
   /* 3. Log event */
-  printk("CSV_LOG,EVENT,TEST_START,Duration_ms=%d\n", TEST_DURATION_MS);
+  printk("CSV_LOG,EVENT,TEST_START,Duration_ms=%d,Interval_ms=%d\n", g_test_duration_ms, g_test_interval_ms);
 
   /* Nháy đèn báo hiệu */
   led_indicate_attention(true);
@@ -459,11 +458,10 @@ static void send_data_handler(struct k_work *work) {
 
   /* CHỈ LÊN LỊCH TIẾP NẾU VẪN CÒN ĐANG CHẠY */
   if (is_sending_active || is_sensor_test_active) {
-    /* Thêm Jitter nhỏ vào mỗi gói tin để tránh hiện tượng rượt đuổi (Sync
-     * collision) */
+    /* Thêm Jitter nhỏ vào mỗi gói tin để tránh hiện tượng rượt đuổi (Sync collision) */
     uint32_t next_jitter = sys_rand32_get() % 200;
     k_work_reschedule(&send_data_work,
-                      K_MSEC(SENSOR_SEND_INTERVAL_MS + next_jitter));
+                      K_MSEC(g_test_interval_ms + next_jitter));
   }
 }
 
@@ -559,7 +557,7 @@ static void button_handler(uint32_t button_state, uint32_t has_changed) {
 
     /* Toggle Test State */
     if (!is_test_running) {
-      sink_start_test();
+      sink_start_test(g_test_duration_ms, g_test_interval_ms);
     } else {
       sink_stop_test();
     }
@@ -589,7 +587,7 @@ void sink_start_stress_test(uint16_t target_addr) {
   }
 
   LOG_INF(">>> SINK: STARTING STRESS TEST to 0x%04x (Duration: %d ms) <<<",
-          target_addr, TEST_DURATION_MS);
+          target_addr, g_test_duration_ms);
 
   is_sink_stress_active = true;
   stress_target_addr = target_addr;
@@ -612,7 +610,7 @@ void sink_start_stress_test(uint16_t target_addr) {
   k_work_schedule(&stress_tx_work, K_NO_WAIT);
 
   /* 2. Start timeout to stop */
-  k_work_schedule(&stress_timeout_work, K_MSEC(TEST_DURATION_MS));
+  k_work_schedule(&stress_timeout_work, K_MSEC(g_test_duration_ms));
 
   /* Nháy đèn báo hiệu */
   led_indicate_attention(true);
