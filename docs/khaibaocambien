@@ -1,0 +1,16 @@
+## LDR GL5528 (Cảm biến ánh sáng)
+# Kết nối: AO → P1.07 (AIN3, CH3, GPIO 39)
+# Đăng ký phần cứng: GPIO 39, ID=5, ADC channel=3
+sensor add 39 5 3
+# Nạp thông số hiệu chuẩn TEDS
+sensor cal 5 3378 10 1296 100 Lux light 0 1000
+
+## Y87Q NTC Thermistor (Cảm biến nhiệt độ)
+# Kết nối: AO → P1.12 (AIN5, CH1, GPIO 19)
+# Đăng ký phần cứng: GPIO 19, ID=6, ADC channel=1
+sensor add 19 6 1
+# Hiệu chuẩn 2 điểm (ĐO THỰC TẾ rồi thay giá trị):
+#   Bước 1: Đặt cảm biến ở 0°C  → gõ "sensor read 6" → ghi lại raw
+#   Bước 2: Đặt cảm biến ở 25°C → gõ "sensor read 6" → ghi lại raw
+#   Bước 3: Thay <raw_0C> và <raw_25C> vào lệnh dưới
+sensor cal 6 <raw_0C> 0 <raw_25C> 25 C temperature -40 125

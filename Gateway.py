@@ -31,12 +31,12 @@ POLLING_INTERVAL = 60
 COLLECTION_WINDOW = 30 
 PAGE_TIMEOUT = 4 
 BACKUP_INTERVAL = 300 
-GATEWAY_NODE = "0007" 
+GATEWAY_NODE = "0002" 
 
 SESSION_ID = time.strftime("%Y%m%d_%H%M%S")
 
 if os.name == 'nt':  
-    SERIAL_PORT = r'\\.\COM26' 
+    SERIAL_PORT = r'\\.\COM32' 
     RAM_DISK_CSV = f'GRADIENT_topo_log_{SESSION_ID}.csv' 
     BACKUP_DIR = 'wsn_backup\\' 
 else:                
@@ -47,6 +47,10 @@ else:
 # Format: $[TOPO],Origin,Seq,TotalPg,CurPg,Count,Grad,Parent,Drp(u16),FwdR(u16),Uptime(u32),TotalSent(u32),[neighbors]
 TOPO_PATTERN = r"\$\[TOPO\],([0-9A-F]{4}),(\d+),(\d+),(\d+),(\d+),(\d+),([0-9A-F]{4}),(\d+),(\d+),(\d+),(\d+),(.*)"
 NEIGHBOR_PATTERN = r"\[([0-9A-F]{4}),(-?\d+),(\d+),(\d+)\]"
+
+# Format: $[SENSOR],Src,Count,[ID,Val],[ID,Val]...
+SENSOR_PATTERN = r"\$\[SENSOR\],(0x[0-9A-F]{4}),(\d+),(.*)"
+SENSOR_ENTRY_PATTERN = r"\[(\d+),(-?\d+)\]"
 
 # Stress Test Log Configuration
 STRESS_LOG_HEADERS = [
@@ -80,6 +84,7 @@ serial_lock = threading.Lock()
 
 app = FastAPI()
 global_ser = None
+main_loop = None
 
 def init_serial():
     global global_ser
@@ -142,6 +147,8 @@ def uart_reader_thread():
                             # print(f"[RAW UART] {line}")
                             if "$[TOPO]" in line:
                                 uart_queue.put(line)
+                            elif "$[SENSOR]" in line:
+                                uart_queue.put(line)
                             elif "CSV_LOG" in line:
                                 stress_queue.put(line)
             time.sleep(0.01)
@@ -189,24 +196,51 @@ def data_processor_thread():
 
         try:
             raw_line = uart_queue.get(timeout=0.1)
-            match = re.search(TOPO_PATTERN, raw_line)
-            if match and collecting_data:
-                origin, seq, total, curr, count, grad, parent, drp, fwdr, uptime, total_sent, n_str = match.groups()
-                neighbors = re.findall(NEIGHBOR_PATTERN, n_str)
-                parsed_nb = [{"addr": n[0], "rssi": int(n[1]), "grad": int(n[2]), "link_uptime": int(n[3])} for n in neighbors]
-                
-                if origin not in page_assembly or page_assembly[origin]['seq'] != int(seq):
-                    page_assembly[origin] = {
-                        'seq': int(seq), 'total': int(total), 'pages': {}, 
-                        'grad': int(grad), 'parent': parent, 'ts': now,
-                        'drp': int(drp), 'fwdr': int(fwdr), 
-                        'uptime': int(uptime), 'total_sent': int(total_sent)
-                    }
-                
-                page_assembly[origin]['pages'][int(curr)] = parsed_nb
-                page_assembly[origin]['ts'] = now 
-                if len(page_assembly[origin]['pages']) == int(total):
-                    commit_topology_to_temp(origin)
+            
+            # --- Handle TOPO ---
+            if "$[TOPO]" in raw_line:
+                match = re.search(TOPO_PATTERN, raw_line)
+                if match and collecting_data:
+                    origin, seq, total, curr, count, grad, parent, drp, fwdr, uptime, total_sent, n_str = match.groups()
+                    neighbors = re.findall(NEIGHBOR_PATTERN, n_str)
+                    parsed_nb = [{"addr": n[0], "rssi": int(n[1]), "grad": int(n[2]), "link_uptime": int(n[3])} for n in neighbors]
+                    
+                    if origin not in page_assembly or page_assembly[origin]['seq'] != int(seq):
+                        page_assembly[origin] = {
+                            'seq': int(seq), 'total': int(total), 'pages': {}, 
+                            'grad': int(grad), 'parent': parent, 'ts': now,
+                            'drp': int(drp), 'fwdr': int(fwdr), 
+                            'uptime': int(uptime), 'total_sent': int(total_sent)
+                        }
+                    
+                    page_assembly[origin]['pages'][int(curr)] = parsed_nb
+                    page_assembly[origin]['ts'] = now 
+                    if len(page_assembly[origin]['pages']) == int(total):
+                        commit_topology_to_temp(origin)
+            
+            # --- Handle SENSOR ---
+            elif "$[SENSOR]" in raw_line:
+                match = re.search(SENSOR_PATTERN, raw_line)
+                if match:
+                    src_hex, count_str, entries_str = match.groups()
+                    entries = re.findall(SENSOR_ENTRY_PATTERN, entries_str)
+                    sensor_list = []
+                    for eid, evalue in entries:
+                        sensor_list.append({
+                            "id": int(eid),
+                            "val": round(int(evalue) / 100.0, 2)
+                        })
+                    
+                    # Broadcast sensor data to all WS clients
+                    sensor_msg = json.dumps({
+                        "type": "sensor_data",
+                        "addr": src_hex.replace("0x", "").upper(),
+                        "ts": time.strftime("%H:%M:%S"),
+                        "sensors": sensor_list
+                    })
+                    if main_loop:
+                        asyncio.run_coroutine_threadsafe(broadcast_sensor_data(sensor_msg), main_loop)
+
         except queue.Empty: pass
 
 def commit_topology_to_temp(origin):
@@ -465,6 +499,17 @@ def stress_processor_thread():
 # ==========================================
 # LUỒNG 5: FASTAPI & WEBSOCKETS
 # ==========================================
+async def broadcast_sensor_data(msg):
+    if ws_clients:
+        disconnected = set()
+        for ws in ws_clients:
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                disconnected.add(ws)
+        for ws in disconnected:
+            ws_clients.remove(ws)
+
 def serialize_graph(g_nx):
     nodes = []
     for n, d in g_nx.nodes(data=True):
@@ -533,6 +578,9 @@ async def get_dashboard():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global main_loop
+    main_loop = asyncio.get_event_loop()
+    
     await websocket.accept()
     ws_clients.add(websocket)
     await websocket.send_text(latest_graph_json if latest_graph_json else graph_to_json())

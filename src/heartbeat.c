@@ -17,6 +17,7 @@
 #include "gradient_srv.h"
 #include "data_forward.h"
 #include "packet_stats.h"
+#include "sensor_manager.h"
 
 LOG_MODULE_REGISTER(heartbeat, LOG_LEVEL_INF);
 
@@ -96,13 +97,15 @@ static void heartbeat_work_handler(struct k_work *work)
         return;
     }
 
-    LOG_DBG("[SensorData] Sending periodic packet (0xFFFF), interval=%ums",
+    LOG_DBG("[SensorData] Sending periodic telemetry, interval=%ums",
             g_sensor_interval_ms);
 
+    /* Collect actual sensor data */
+    sensor_packet_t pkt;
+    build_sensor_packet(&pkt);
+
     /* Send sensor data packet via best parent */
-    uint16_t dummy_addr = 0;
-    int err = data_forward_send_direct(heartbeat_srv, dummy_addr,
-                                       BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER, 0);
+    int err = bt_mesh_gradient_srv_sensor_data_send(heartbeat_srv, &pkt);
 
     if (err == 0) {
         pkt_stats_inc_heartbeat();

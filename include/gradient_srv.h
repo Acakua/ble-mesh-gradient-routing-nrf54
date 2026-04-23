@@ -74,6 +74,11 @@ extern "C" {
 #define BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL BT_MESH_MODEL_OP_3(0x17, \
                         BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
 
+/* [NEW] Sensor Data Telemetry opcode — Uplink from Node to Sink */
+/* Payload: Src(2B) + Hop(1B) + Count(1B) + [ID(1B) + Val(2B)] * Count */
+#define BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA     BT_MESH_MODEL_OP_3(0x18, \
+                        BT_MESH_GRADIENT_SRV_VENDOR_COMPANY_ID)
+
 #define BT_MESH_GRADIENT_SRV_MSG_MINLEN_MESSAGE  1
 #define BT_MESH_GRADIENT_SRV_MSG_MAXLEN_MESSAGE  64 /* Increased safety margin */
 #define BT_MESH_GRADIENT_SRV_DATA_MSG_LEN        7  /* Src(2)+Data(2)+TTL(1)+Hop(1)+MinRSSI(1) */
@@ -151,6 +156,16 @@ struct bt_mesh_gradient_srv_handlers {
      * @param[in] interval Packet interval in milliseconds.
      */
     void (*const test_start_received)(struct bt_mesh_gradient_srv *srv, uint16_t interval);
+
+    /** [NEW] Called when SENSOR_DATA is received and this node is the sink (Gateway).
+     *
+     * @param[in] srv  Gradient server instance.
+     * @param[in] src  Original source address.
+     * @param[in] pkt  Pointer to parsed sensor packet (stack allocated).
+     */
+    void (*const sensor_data_received)(struct bt_mesh_gradient_srv *srv, 
+                                       uint16_t src, 
+                                       const void *pkt);
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -376,6 +391,18 @@ int bt_mesh_gradient_srv_send_sensor_interval(
     struct bt_mesh_gradient_srv *srv,
     uint16_t dest_addr,
     uint16_t interval_sec);
+
+/** @brief [NEW] Send multi-sensor data packet to Sink.
+ *
+ * Collects data from sensor_manager and sends via OP_SENSOR_DATA.
+ * Uses Gradient Routing (hop-by-hop) to reach the Sink.
+ *
+ * @param srv   Pointer to gradient server instance.
+ * @param pkt   Pointer to sensor packet to send.
+ * @return 0 on success, error code otherwise.
+ */
+int bt_mesh_gradient_srv_sensor_data_send(struct bt_mesh_gradient_srv *srv,
+                                          const void *pkt);
 
 /** @cond INTERNAL_HIDDEN */
 extern const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[];

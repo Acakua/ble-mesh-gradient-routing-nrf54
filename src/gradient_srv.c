@@ -16,6 +16,7 @@
 #include <zephyr/bluetooth/mesh/statistic.h>
 #include <zephyr/kernel.h>
 #include <zephyr/random/random.h>
+#include "sensor_manager.h"
 
 
 LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_INF);
@@ -251,6 +252,65 @@ static int handle_data_message(const struct bt_mesh_model *model,
                 err);
       }
     }
+  }
+
+  return 0;
+}
+
+static int handle_sensor_data_message(const struct bt_mesh_model *model,
+                                      struct bt_mesh_msg_ctx *ctx,
+                                      struct net_buf_simple *buf) {
+  struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+
+  if (buf->len < 4) {
+    return -EINVAL;
+  }
+
+  uint16_t src = net_buf_simple_pull_le16(buf);
+  uint8_t hop = net_buf_simple_pull_u8(buf);
+  uint8_t count = net_buf_simple_pull_u8(buf);
+
+  if (srv->gradient == 0) {
+    /* I AM SINK: Output to UART for Gateway.py */
+    char uart_buf[256];
+    int pos = snprintf(uart_buf, sizeof(uart_buf), "$[SENSOR],0x%04X,%d", src, count);
+
+    for (int i = 0; i < count; i++) {
+      if (buf->len < 3) break;
+      uint8_t id = net_buf_simple_pull_u8(buf);
+      int16_t val = net_buf_simple_pull_le16(buf);
+      if (pos < (int)sizeof(uart_buf)) {
+        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%d,%d]", id, val);
+      }
+    }
+    printk("%s\n", uart_buf);
+    LOG_INF("[SENSOR] Received telemetry from 0x%04x, count=%d, hops=%d", src, count, hop);
+  } else {
+    /* I AM RELAY: Forward to best parent */
+    k_mutex_lock(&srv->forwarding_table_mutex, K_FOREVER);
+    uint16_t nexthop = srv->forwarding_table[0].addr;
+    k_mutex_unlock(&srv->forwarding_table_mutex);
+
+    if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+      LOG_WRN("[SENSOR] Relay: No parent to forward from 0x%04x", src);
+      return 0;
+    }
+
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA, 64);
+    bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA);
+    net_buf_simple_add_le16(&msg, src);
+    net_buf_simple_add_u8(&msg, hop + 1);
+    net_buf_simple_add_u8(&msg, count);
+    net_buf_simple_add_mem(&msg, buf->data, buf->len);
+
+    struct bt_mesh_msg_ctx fwd_ctx = {
+        .app_idx = model->keys[0],
+        .addr = nexthop,
+        .send_ttl = BT_MESH_TTL_DEFAULT,
+    };
+
+    srv_send_msg_with_stat(srv, &fwd_ctx, &msg);
+    LOG_INF("[SENSOR] Relayed telemetry from 0x%04x to 0x%04x (hop %d)", src, nexthop, hop);
   }
 
   return 0;
@@ -1495,6 +1555,8 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
      handle_backprop_broadcast},
     /* [NEW] Sensor Interval: Gateway sets per-node sensor data TX interval */
     {BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, BT_MESH_LEN_EXACT(5), handle_sensor_interval},
+    /* [NEW] Sensor Data Telemetry */
+    {BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA, BT_MESH_LEN_MIN(4), handle_sensor_data_message},
     BT_MESH_MODEL_OP_END,
 };
 
@@ -1912,5 +1974,45 @@ int bt_mesh_gradient_srv_send_sensor_interval(
 
   LOG_INF("[SENSOR_INTERVAL] Unicast interval=%us to 0x%04x via nexthop=0x%04x",
           interval_sec, dest_addr, nexthop);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
+}
+int bt_mesh_gradient_srv_sensor_data_send(struct bt_mesh_gradient_srv *srv,
+                                          const void *pkt) {
+  if (!srv || !pkt) return -EINVAL;
+  const sensor_packet_t *p = (const sensor_packet_t *)pkt;
+  uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+
+  if (srv->gradient == 0) return -EINVAL; // Sink doesn't send
+
+  k_mutex_lock(&srv->forwarding_table_mutex, K_FOREVER);
+  uint16_t nexthop = srv->forwarding_table[0].addr;
+  k_mutex_unlock(&srv->forwarding_table_mutex);
+
+  if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+    LOG_WRN("[SENSOR] TX Failed: No parent route");
+    return -ENETUNREACH;
+  }
+
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA, 64);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA);
+
+  net_buf_simple_add_le16(&msg, my_addr);
+  net_buf_simple_add_u8(&msg, 1); // Initial hop
+  net_buf_simple_add_u8(&msg, p->count);
+
+  for (int i = 0; i < p->count; i++) {
+    net_buf_simple_add_u8(&msg, p->entries[i].sensor_id);
+    /* Scale value by 100 for integer transmission (e.g. 25.55 -> 2555) */
+    int16_t val_scaled = (int16_t)(p->entries[i].physical * 100.0f);
+    net_buf_simple_add_le16(&msg, val_scaled);
+  }
+
+  struct bt_mesh_msg_ctx ctx = {
+    .app_idx = srv->model->keys[0],
+    .addr = nexthop,
+    .send_ttl = BT_MESH_TTL_DEFAULT,
+  };
+
+  LOG_INF("[SENSOR] Sending telemetry with %d sensors to Sink via 0x%04x", p->count, nexthop);
   return srv_send_msg_with_stat(srv, &ctx, &msg);
 }

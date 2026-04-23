@@ -6,7 +6,7 @@ project(gradient_srv)
 # Workaround for NCS 3.0.1 build failure on nRF54L15
 # Ensures soc.c correctly identifies the Zephyr environment during TF-M build
 if(CONFIG_TF_M)
-	set(TFM_PLATFORM_EXT_CONFIG_FLAGS "-D__ZEPHYR__=1" CACHE STRING "TFM extra flags" FORCE)
+	set(TFM_PLATFORM_EXT_CONFIG_FLAGS "-D__ZEPHYR__=1 -DMBEDTLS_PSA_CRYPTO_USER_CONFIG_FILE=\\\"nrf-psa-crypto-user-config.h\\\"" CACHE STRING "TFM extra flags" FORCE)
 endif()
 
 # NORDIC SDK APP START
@@ -22,6 +22,10 @@ target_sources(app PRIVATE
 	src/reverse_routing.c
 	src/heartbeat.c
 	src/shell_commands.c
-	src/packet_stats.c)
+	src/packet_stats.c
+	src/sensor_manager.c
+	src/sensor_shell.c
+	src/storage.c
+	src/teds_tlv.c)
 target_include_directories(app PRIVATE include)
 # NORDIC SDK APP END
