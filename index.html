@@ -1,0 +1,1776 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Gradient Mesh WSN — Real-time BLE Mesh Sensor Network Control Dashboard">
+    <title>Gradient Mesh — WSN Control Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        /* ======================================================
+           Design Tokens
+        ====================================================== */
+        :root {
+            --bg-base: #030710;
+            --bg-surface: #060E1C;
+            --bg-card: #0A1628;
+            --bg-card-2: #0E1C35;
+            --bg-card-hover: #111F35;
+            --bg-input: #04090F;
+
+            --primary: #00D4FF;
+            --primary-dim: rgba(0, 212, 255, 0.10);
+            --primary-glow: rgba(0, 212, 255, 0.22);
+            --primary-faint: rgba(0, 212, 255, 0.04);
+
+            --accent: #7B61FF;
+            --accent-dim: rgba(123, 97, 255, 0.12);
+
+            --success: #00E676;
+            --success-dim: rgba(0, 230, 118, 0.10);
+
+            --danger: #FF4455;
+            --danger-dim: rgba(255, 68, 85, 0.10);
+
+            --warning: #FFB300;
+            --warning-dim: rgba(255, 179, 0, 0.10);
+
+            --orange: #FF6B35;
+            --orange-dim: rgba(255, 107, 53, 0.10);
+
+            --gold: #FFD700;
+
+            --text-1: #D0E8FF;
+            --text-2: #5D88AA;
+            --text-3: #2E4A60;
+
+            --border: rgba(0, 212, 255, 0.08);
+            --border-hover: rgba(0, 212, 255, 0.20);
+            --border-strong: rgba(0, 212, 255, 0.35);
+
+            --radius-sm: 5px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+            --radius-xl: 18px;
+
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+
+            --ease: cubic-bezier(0.4, 0, 0.2, 1);
+            --fast: 160ms;
+            --glow-primary: 0 0 20px rgba(0, 212, 255, 0.15);
+            --shadow-card: 0 4px 28px rgba(0, 0, 0, 0.45);
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html,
+        body {
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg-base);
+            color: var(--text-1);
+            font-family: var(--font-sans);
+            font-size: 13px;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ======================================================
+           App Shell — 2×2 Grid
+        ====================================================== */
+        .app-shell {
+            height: 100vh;
+            display: grid;
+            grid-template-rows: 52px 1fr;
+            grid-template-columns: 1fr 370px;
+            grid-template-areas:
+                "header header"
+                "graph  panel";
+        }
+
+        /* ======================================================
+           Header
+        ====================================================== */
+        #header {
+            grid-area: header;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 0 18px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border);
+            box-shadow: 0 1px 0 rgba(0, 212, 255, 0.04);
+            z-index: 100;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            flex-shrink: 0;
+            text-decoration: none;
+        }
+
+        .logo-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 7px;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            box-shadow: 0 0 14px var(--primary-glow);
+            flex-shrink: 0;
+        }
+
+        .logo-text {
+            font-size: 12.5px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-1);
+        }
+
+        .logo-sub {
+            font-size: 9.5px;
+            font-weight: 400;
+            color: var(--text-3);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .header-stats {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .hbadge {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 11px;
+            background: var(--primary-faint);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            font-size: 11.5px;
+            color: var(--text-2);
+        }
+
+        .hbadge .dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: 0 0 5px var(--primary);
+        }
+
+        .hbadge strong {
+            color: var(--text-1);
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        #ws-badge {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 13px;
+            border-radius: 20px;
+            font-size: 11.5px;
+            font-weight: 600;
+            border: 1px solid transparent;
+            flex-shrink: 0;
+            transition: all var(--fast) var(--ease);
+        }
+
+        #ws-badge.connected {
+            background: var(--success-dim);
+            border-color: rgba(0, 230, 118, .3);
+            color: var(--success);
+        }
+
+        #ws-badge.disconnected {
+            background: var(--danger-dim);
+            border-color: rgba(255, 68, 85, .3);
+            color: var(--danger);
+        }
+
+        .ws-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .ws-dot.pulse {
+            animation: wsPulse 1.6s infinite;
+        }
+
+        @keyframes wsPulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: .45;
+            }
+        }
+
+        /* ======================================================
+           Graph Area
+        ====================================================== */
+        #graph-area {
+            grid-area: graph;
+            position: relative;
+            background: radial-gradient(ellipse at 30% 50%, rgba(0, 212, 255, 0.025) 0%, transparent 70%),
+                var(--bg-base);
+            border-right: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .graph-toolbar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 14px;
+            height: 38px;
+            background: rgba(6, 14, 28, 0.90);
+            border-bottom: 1px solid var(--border);
+            backdrop-filter: blur(4px);
+        }
+
+        .graph-title {
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 1.3px;
+            text-transform: uppercase;
+            color: var(--primary);
+        }
+
+        .graph-hint {
+            font-size: 10.5px;
+            color: var(--text-3);
+        }
+
+        #mynetwork {
+            position: absolute;
+            top: 38px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            outline: none;
+        }
+
+        /* ======================================================
+           Control Panel
+        ====================================================== */
+        #panel {
+            grid-area: panel;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-surface);
+            overflow: hidden;
+        }
+
+        .panel-inner {
+            flex: 1;
+            overflow-y: auto;
+            padding: 11px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-hover) transparent;
+        }
+
+        .panel-inner::-webkit-scrollbar {
+            width: 3px;
+        }
+
+        .panel-inner::-webkit-scrollbar-thumb {
+            background: var(--border-hover);
+            border-radius: 2px;
+        }
+
+        /* ======================================================
+           Cards
+        ====================================================== */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            transition: border-color var(--fast) var(--ease),
+                box-shadow var(--fast) var(--ease);
+        }
+
+        .card:hover {
+            border-color: var(--border-hover);
+        }
+
+        .card-hd {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 13px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(0, 212, 255, 0.02);
+        }
+
+        .card-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.3px;
+            text-transform: uppercase;
+            color: var(--text-2);
+        }
+
+        .card-body {
+            padding: 11px 13px;
+        }
+
+        /* ======================================================
+           Buttons
+        ====================================================== */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            padding: 8px 11px;
+            border-radius: var(--radius-md);
+            border: 1px solid transparent;
+            background: transparent;
+            font-family: var(--font-sans);
+            font-size: 11.5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--fast) var(--ease);
+            white-space: nowrap;
+            letter-spacing: 0.2px;
+        }
+
+        .btn:active:not(:disabled) {
+            transform: scale(0.96);
+        }
+
+        .btn:disabled {
+            opacity: 0.38;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            border-color: var(--border-hover);
+            color: var(--primary);
+            background: var(--primary-dim);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            border-color: var(--primary);
+            background: var(--primary-glow);
+            box-shadow: var(--glow-primary);
+        }
+
+        .btn-success {
+            border-color: rgba(0, 230, 118, .25);
+            color: var(--success);
+            background: var(--success-dim);
+        }
+
+        .btn-success:hover:not(:disabled) {
+            border-color: var(--success);
+            box-shadow: 0 0 12px rgba(0, 230, 118, .20);
+        }
+
+        .btn-danger {
+            border-color: rgba(255, 68, 85, .25);
+            color: var(--danger);
+            background: var(--danger-dim);
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            border-color: var(--danger);
+            box-shadow: 0 0 12px rgba(255, 68, 85, .20);
+        }
+
+        .btn-warning {
+            border-color: rgba(255, 179, 0, .25);
+            color: var(--warning);
+            background: var(--warning-dim);
+        }
+
+        .btn-warning:hover:not(:disabled) {
+            border-color: var(--warning);
+            box-shadow: 0 0 12px rgba(255, 179, 0, .20);
+        }
+
+        .btn-accent {
+            border-color: rgba(123, 97, 255, .25);
+            color: var(--accent);
+            background: var(--accent-dim);
+        }
+
+        .btn-accent:hover:not(:disabled) {
+            border-color: var(--accent);
+            box-shadow: 0 0 12px rgba(123, 97, 255, .20);
+        }
+
+        .btn-orange {
+            border-color: rgba(255, 107, 53, .25);
+            color: var(--orange);
+            background: var(--orange-dim);
+        }
+
+        .btn-orange:hover:not(:disabled) {
+            border-color: var(--orange);
+        }
+
+        .btn-sm {
+            padding: 4px 9px;
+            font-size: 10.5px;
+        }
+
+        .g2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+
+        .g3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 6px;
+        }
+
+        .mb6 {
+            margin-bottom: 6px;
+        }
+
+        /* ======================================================
+           Node Info
+        ====================================================== */
+        .node-addr {
+            font-family: var(--font-mono);
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--primary);
+            letter-spacing: 1.5px;
+            margin-bottom: 10px;
+        }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin-bottom: 11px;
+        }
+
+        .meta-item {
+            background: linear-gradient(145deg, var(--bg-card-2), rgba(10, 22, 40, 0.5));
+            border: 1px solid var(--border-hover);
+            border-radius: var(--radius-md);
+            padding: 8px 12px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            transition: border-color var(--fast), box-shadow var(--fast);
+        }
+
+        .meta-item:hover {
+            border-color: var(--primary-dim);
+            box-shadow: 0 4px 12px rgba(0, 212, 255, 0.08);
+        }
+
+        .meta-label {
+            font-size: 9px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--text-3);
+            margin-bottom: 2px;
+        }
+
+        .meta-value {
+            font-family: var(--font-mono);
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--text-1);
+        }
+
+        .role-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 9px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .role-gw {
+            background: rgba(255, 215, 0, .12);
+            color: var(--gold);
+            border: 1px solid rgba(255, 215, 0, .30);
+        }
+
+        .role-sn {
+            background: var(--primary-dim);
+            color: var(--primary);
+            border: 1px solid var(--border-hover);
+        }
+
+        /* ======================================================
+           Activity Log
+        ====================================================== */
+        .log-inner {
+            max-height: 195px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-hover) transparent;
+        }
+
+        .log-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 7px;
+            padding: 6px 9px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-family: var(--font-mono);
+            font-size: 10.5px;
+            animation: logIn .18s ease;
+        }
+
+        @keyframes logIn {
+            from {
+                opacity: 0;
+                transform: translateX(-6px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .log-ts {
+            color: var(--text-3);
+            flex-shrink: 0;
+        }
+
+        .log-msg {
+            flex: 1;
+            color: var(--text-1);
+            word-break: break-all;
+        }
+
+        .log-ok {
+            color: var(--success);
+        }
+
+        .log-err {
+            color: var(--danger);
+        }
+
+        .log-inf {
+            color: var(--primary);
+        }
+
+        /* ======================================================
+           Modals
+        ====================================================== */
+        .overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(3, 7, 16, 0.85);
+            backdrop-filter: blur(5px);
+            z-index: 9000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--fast) var(--ease);
+        }
+
+        .overlay.open {
+            opacity: 1;
+            pointer-events: all;
+        }
+
+        .modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-xl);
+            padding: 24px 26px;
+            width: 390px;
+            max-width: calc(100vw - 32px);
+            box-shadow: 0 24px 64px rgba(0, 0, 0, .65), var(--glow-primary);
+            transform: translateY(-14px) scale(0.97);
+            transition: transform var(--fast) var(--ease);
+        }
+
+        .overlay.open .modal {
+            transform: translateY(0) scale(1);
+        }
+
+        .modal-title {
+            font-size: 14.5px;
+            font-weight: 700;
+            color: var(--text-1);
+            margin-bottom: 3px;
+        }
+
+        .modal-sub {
+            font-size: 12px;
+            color: var(--text-2);
+            margin-bottom: 18px;
+        }
+
+        .mono-tag {
+            font-family: var(--font-mono);
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: .9px;
+            text-transform: uppercase;
+            color: var(--text-2);
+            margin-bottom: 7px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 11px 13px;
+            background: var(--bg-input);
+            border: 1.5px solid var(--border-hover);
+            border-radius: var(--radius-md);
+            color: var(--text-1);
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 500;
+            outline: none;
+            transition: border-color var(--fast), box-shadow var(--fast);
+        }
+
+        .form-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-dim);
+        }
+
+        .form-input.err {
+            border-color: var(--danger);
+            box-shadow: 0 0 0 3px var(--danger-dim);
+        }
+
+        .form-hint {
+            font-size: 11px;
+            color: var(--text-3);
+            margin-top: 6px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 7px;
+            justify-content: flex-end;
+            margin-top: 6px;
+        }
+
+        .modal-actions .btn {
+            min-width: 88px;
+        }
+
+        /* Warning icon for reset */
+        .warn-icon {
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            background: var(--danger-dim);
+            border: 1px solid rgba(255, 68, 85, .3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            margin-bottom: 14px;
+        }
+
+        /* Stats grid inside modal */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 14px 0;
+        }
+
+        .stat-cell {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 11px 12px;
+            text-align: center;
+        }
+
+        .stat-val {
+            font-family: var(--font-mono);
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--primary);
+            display: block;
+        }
+
+        .stat-lbl {
+            font-size: 9.5px;
+            color: var(--text-3);
+            text-transform: uppercase;
+            letter-spacing: .8px;
+            margin-top: 2px;
+        }
+
+        /* ======================================================
+           Context Menu
+        ====================================================== */
+        #ctx-menu {
+            position: fixed;
+            display: none;
+            background: var(--bg-card);
+            border: 1px solid var(--border-hover);
+            border-radius: var(--radius-lg);
+            box-shadow: 0 10px 36px rgba(0, 0, 0, .65), var(--glow-primary);
+            z-index: 5000;
+            min-width: 205px;
+            overflow: hidden;
+        }
+
+        #ctx-menu.open {
+            display: block;
+            animation: ctxIn .14s var(--ease);
+        }
+
+        @keyframes ctxIn {
+            from {
+                opacity: 0;
+                transform: scale(.95) translateY(-4px);
+            }
+
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+
+        .ctx-hd {
+            padding: 9px 13px 7px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .ctx-addr {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--primary);
+        }
+
+        .ctx-sub {
+            font-size: 9.5px;
+            color: var(--text-3);
+        }
+
+        .ctx-item {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 9px 13px;
+            cursor: pointer;
+            font-size: 12.5px;
+            color: var(--text-1);
+            transition: background var(--fast);
+        }
+
+        .ctx-item:hover {
+            background: var(--bg-card-2);
+        }
+
+        .ctx-ico {
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+
+        .ico-cyan {
+            background: var(--primary-dim);
+        }
+
+        .ico-green {
+            background: var(--success-dim);
+        }
+
+        .ico-purple {
+            background: var(--accent-dim);
+        }
+
+        .ico-orange {
+            background: var(--orange-dim);
+        }
+
+        .ico-red {
+            background: var(--danger-dim);
+        }
+
+        .ctx-sep {
+            height: 1px;
+            background: var(--border);
+            margin: 3px 0;
+        }
+
+        /* vis.js tooltip override */
+        div.vis-tooltip {
+            background: rgba(10, 22, 40, .97) !important;
+            border: 1px solid var(--border-strong) !important;
+            border-radius: 8px !important;
+            color: var(--text-1) !important;
+            font-family: var(--font-mono) !important;
+            font-size: 11.5px !important;
+            padding: 10px 14px !important;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, .55), var(--glow-primary) !important;
+            white-space: pre !important;
+        }
+
+        /* Empty node hint */
+        .empty-hint {
+            text-align: center;
+            padding: 22px 16px;
+        }
+
+        .empty-hint .ico {
+            font-size: 30px;
+            opacity: 0.22;
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        .empty-hint p {
+            font-size: 11.5px;
+            color: var(--text-3);
+        }
+
+        /* Divider */
+        .divider {
+            height: 1px;
+            background: var(--border);
+            margin: 8px 0;
+        }
+
+        /* Test running indicator */
+        #test-status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 7px 10px;
+            border-radius: var(--radius-md);
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            transition: all var(--fast);
+        }
+
+        #test-status.running {
+            background: var(--success-dim);
+            border: 1px solid rgba(0, 230, 118, .25);
+            color: var(--success);
+        }
+
+        #test-status.idle {
+            background: var(--primary-faint);
+            border: 1px solid var(--border);
+            color: var(--text-3);
+        }
+
+        @keyframes rotate {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .spin {
+            display: inline-block;
+            animation: rotate .9s linear infinite;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="app-shell">
+
+        <!-- ============================================================
+         HEADER
+    ============================================================ -->
+        <header id="header">
+            <div class="logo">
+                <div class="logo-icon">⬡</div>
+                <div>
+                    <div class="logo-text">Gradient Mesh</div>
+                    <div class="logo-sub">WSN Control Center</div>
+                </div>
+            </div>
+
+            <div class="header-stats">
+                <div class="hbadge">
+                    <div class="dot"></div>
+                    <span><strong id="stat-nodes">0</strong> Nodes</span>
+                </div>
+                <div class="hbadge">
+                    <div class="dot" style="background:var(--accent);box-shadow:0 0 5px var(--accent)"></div>
+                    <span><strong id="stat-edges">0</strong> Active Routes</span>
+                </div>
+                <div class="hbadge">
+                    <div class="dot" style="background:var(--warning);box-shadow:0 0 5px var(--warning)"></div>
+                    <span>Updated <strong id="stat-updated">—</strong></span>
+                </div>
+            </div>
+
+            <div id="ws-badge" class="disconnected">
+                <div class="ws-dot" id="ws-dot"></div>
+                <span id="ws-text">Disconnected</span>
+            </div>
+        </header>
+
+        <!-- ============================================================
+         GRAPH
+    ============================================================ -->
+        <section id="graph-area">
+            <div class="graph-toolbar">
+                <span class="graph-title">Live Network Topology (RRT)</span>
+                <span class="graph-hint">Double-click a node for commands</span>
+            </div>
+            <div id="mynetwork"></div>
+        </section>
+
+        <!-- ============================================================
+         CONTROL PANEL
+    ============================================================ -->
+        <aside id="panel">
+            <div class="panel-inner">
+
+                <!-- ── Global Commands ── -->
+                <div class="card">
+                    <div class="card-hd">
+                        <div class="card-title">⚡ Global Commands</div>
+                    </div>
+                    <div class="card-body">
+                        <div id="test-status" class="idle">
+                            <span>● Test: Idle</span>
+                        </div>
+                        <div class="g2 mb6">
+                            <button id="btn-start" class="btn btn-success" onclick="openOverlay('ov-test-config')"
+                                title="Configure and start stress test">
+                                ▶ Start Test
+                            </button>
+                            <button id="btn-stop" class="btn btn-warning" onclick="globalCmd('report_stop')"
+                                title="mesh report stop">
+                                ⏹ Stop All Tests
+                            </button>
+                        </div>
+                        <div class="g2">
+                            <button id="btn-iall" class="btn btn-primary" onclick="openOverlay('ov-iall')"
+                                title="mesh sensor_interval_all">
+                                🌐 All Intervals
+                            </button>
+                            <button id="btn-reset" class="btn btn-danger" onclick="openOverlay('ov-confirm')">
+                                ⚠ Net Reset
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+
+                <!-- ── Selected Node ── -->
+                <div class="card" id="node-card" style="display:none">
+                    <div class="card-hd">
+                        <div class="card-title">🎮 Node Control</div>
+                        <div id="node-role" class="role-badge role-sn">SENSOR</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="node-addr" id="nd-addr" style="font-size: 16px; margin-bottom: 8px;">0x0000</div>
+                        
+                        <!-- Actions Grid -->
+                        <div class="g2 mb6">
+                            <button class="btn btn-primary" onclick="nodeCmd('attention')" id="nd-btn-attn"
+                                title="mesh attention <addr>">
+                                💡 Attention
+                            </button>
+                            <button class="btn btn-primary" onclick="openOverlay('ov-interval')"
+                                title="mesh sensor_interval <addr> <sec>">
+                                ⏱ Set Interval
+                            </button>
+                        </div>
+                        <div class="g2">
+                            <button class="btn btn-accent" onclick="openOverlay('ov-backprop')"
+                                title="mesh backprop <addr> <payload>">
+                                📡 Backprop
+                            </button>
+                            <button class="btn btn-orange" onclick="nodeCmd('stress_dl')" id="nd-btn-stress"
+                                title="mesh stress_dl <addr>">
+                                🧪 Stress DL
+                            </button>
+                        </div>
+                        <div class="divider" style="margin: 10px 0;"></div>
+                        <button class="btn btn-warning" style="width:100%" onclick="globalCmd('report_stop')"
+                            id="nd-btn-stop" title="mesh report stop">
+                            ⏹ Stop All Tests
+                        </button>
+
+                        <!-- Focused Sensor Data -->
+                        <div id="focused-sensors" style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border);">
+                            <div style="font-size: 9px; font-weight: 700; color: var(--text-3); text-transform: uppercase; margin-bottom: 8px; letter-spacing: 1px;">
+                                🌡️ Live Sensor Data
+                            </div>
+                            <div id="sensor-list-focused" style="display: flex; flex-direction: column; gap: 6px;">
+                                <div style="font-size: 11px; color: var(--text-3); font-style: italic;">No telemetry received yet</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── Empty hint ── -->
+                <div class="card" id="node-hint">
+                    <div class="card-body">
+                        <div class="empty-hint">
+                            <span class="ico">📡</span>
+                            <p>Double-click a node in the topology graph to see node-specific controls</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── Command Log ── -->
+                <div class="card">
+                    <div class="card-hd">
+                        <div class="card-title">📋 Command Log</div>
+                        <button class="btn btn-primary btn-sm" onclick="clearLog()">Clear</button>
+                    </div>
+                    <div class="card-body" style="padding:8px">
+                        <div class="log-inner" id="log-list">
+                            <div class="log-item">
+                                <span class="log-ts">—</span>
+                                <span class="log-msg log-inf">Gateway not connected</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div><!-- /panel-inner -->
+        </aside>
+
+    </div><!-- /app-shell -->
+
+    <!-- ================================================================
+     CONTEXT MENU
+================================================================ -->
+    <div id="ctx-menu">
+        <div class="ctx-hd">
+            <div class="ctx-sub">Node</div>
+            <div class="ctx-addr" id="ctx-addr-txt">0x0000</div>
+        </div>
+        <div class="ctx-item" onclick="nodeCmd('attention'); closeMenu()">
+            <div class="ctx-ico ico-cyan">💡</div> Attention (LED Blink)
+        </div>
+        <div class="ctx-item" onclick="openOverlay('ov-interval'); closeMenu()">
+            <div class="ctx-ico ico-cyan">⏱</div> Set Sensor Interval
+        </div>
+        <div class="ctx-sep"></div>
+        <div class="ctx-item" onclick="openOverlay('ov-backprop'); closeMenu()">
+            <div class="ctx-ico ico-purple">📡</div> Send Backprop Data
+        </div>
+        <div class="ctx-item" onclick="nodeCmd('stress_dl'); closeMenu()">
+            <div class="ctx-ico ico-orange">🧪</div> Run DL Stress Test
+        </div>
+    </div>
+
+    <!-- ================================================================
+     OVERLAY: Set Sensor Interval (single node)
+================================================================ -->
+    <div class="overlay" id="ov-interval">
+        <div class="modal">
+            <div class="modal-title">⏱ Set Sensor Interval</div>
+            <div class="modal-sub">Node: <span class="mono-tag" id="ov-int-target">—</span></div>
+            <div class="form-group">
+                <label class="form-label" for="inp-interval">Interval (seconds)</label>
+                <input id="inp-interval" class="form-input" type="number" min="1" max="65535" placeholder="20"
+                    autocomplete="off">
+                <p class="form-hint">Range: 1 – 65 535 sec &nbsp;·&nbsp; Default: 20 sec</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" style="border-color:var(--border-hover);color:var(--text-2)"
+                    onclick="closeOverlay('ov-interval')">Cancel</button>
+                <button class="btn btn-success" onclick="applyInterval()">✓ Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+     OVERLAY: Set All Intervals (broadcast)
+================================================================ -->
+    <div class="overlay" id="ov-iall">
+        <div class="modal">
+            <div class="modal-title">🌐 Broadcast Interval</div>
+            <div class="modal-sub">Apply to <strong>all nodes</strong> in the mesh network</div>
+            <div class="form-group">
+                <label class="form-label" for="inp-iall">Interval (seconds)</label>
+                <input id="inp-iall" class="form-input" type="number" min="1" max="65535" placeholder="20"
+                    autocomplete="off">
+                <p class="form-hint">All sensor nodes will update transmission interval simultaneously</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" style="border-color:var(--border-hover);color:var(--text-2)"
+                    onclick="closeOverlay('ov-iall')">Cancel</button>
+                <button class="btn btn-success" onclick="applyIntervalAll()">✓ Broadcast</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+     OVERLAY: Send Backprop
+================================================================ -->
+    <div class="overlay" id="ov-backprop">
+        <div class="modal">
+            <div class="modal-title">📡 Send Backprop Data</div>
+            <div class="modal-sub">Destination: <span class="mono-tag" id="ov-bp-target">—</span></div>
+            <div class="form-group">
+                <label class="form-label" for="inp-payload">Payload Value (0 – 65 535)</label>
+                <input id="inp-payload" class="form-input" type="number" min="0" max="65535" placeholder="0"
+                    autocomplete="off">
+                <p class="form-hint">Integer value sent downstream via BACKPROP opcode</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" style="border-color:var(--border-hover);color:var(--text-2)"
+                    onclick="closeOverlay('ov-backprop')">Cancel</button>
+                <button class="btn btn-accent" onclick="applyBackprop()">↓ Send</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+     OVERLAY: Confirm Network Reset
+================================================================ -->
+    <div class="overlay" id="ov-confirm">
+        <div class="modal">
+            <div class="warn-icon">⚠️</div>
+            <div class="modal-title">Network-wide SDN Reset</div>
+            <div class="modal-sub" style="margin-bottom:20px">
+                This will broadcast a <strong>RESET command</strong> to all nodes in the mesh.<br>
+                All forwarding tables and reverse routing tables will be cleared.<br>
+                Nodes will restart route discovery from scratch.
+            </div>
+            <div class="modal-actions">
+                <button class="btn" style="border-color:var(--border-hover);color:var(--text-2)"
+                    onclick="closeOverlay('ov-confirm')">Cancel</button>
+                <button class="btn btn-danger" style="min-width:155px"
+                    onclick="globalCmd('sdn_reset'); closeOverlay('ov-confirm')">⚠ Yes, Reset Network</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+     OVERLAY: Test Config
+================================================================ -->
+    <div class="overlay" id="ov-test-config">
+        <div class="modal">
+            <div class="modal-title">🛠 Test Configuration</div>
+            <div class="modal-sub">Configure duration and frequency for the network test.</div>
+            <div class="form-group">
+                <label class="form-label" for="inp-test-duration">Test Duration (seconds)</label>
+                <input id="inp-test-duration" class="form-input" type="number" min="10" max="3600" value="300"
+                    autocomplete="off">
+                <p class="form-hint">How long the test runs before auto-stopping (10s – 1h).</p>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="inp-test-interval">Send Frequency (ms)</label>
+                <input id="inp-test-interval" class="form-input" type="number" min="200" max="60000" value="2000"
+                    autocomplete="off">
+                <p class="form-hint">How often each node sends a packet (Min 200ms).</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" style="border-color:var(--border-hover);color:var(--text-2)"
+                    onclick="closeOverlay('ov-test-config')">Cancel</button>
+                <button class="btn btn-success" onclick="confirmStartTest()">▶ Start Now</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+     OVERLAY: Stats
+================================================================ -->
+    <div class="overlay" id="ov-stats">
+        <div class="modal">
+            <div class="modal-title">📊 Network Statistics</div>
+            <div class="modal-sub">TX packet counters on gateway node</div>
+            <div class="stats-grid">
+                <div class="stat-cell">
+                    <span class="stat-val" id="st-beacon">—</span>
+                    <div class="stat-lbl">Gradient Beacons</div>
+                </div>
+                <div class="stat-cell">
+                    <span class="stat-val" id="st-hb">—</span>
+                    <div class="stat-lbl">Sensor Data TX</div>
+                </div>
+                <div class="stat-cell">
+                    <span class="stat-val" id="st-data">—</span>
+                    <div class="stat-lbl">Stress Data TX</div>
+                </div>
+                <div class="stat-cell" style="border-color:rgba(0,212,255,.2)">
+                    <span class="stat-val" id="st-ovhd" style="color:var(--warning)">—</span>
+                    <div class="stat-lbl">Control Overhead</div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-danger" onclick="globalCmd('stats_reset'); setTimeout(requestStats,400)">Reset
+                    Counters</button>
+                <button class="btn btn-primary" onclick="requestStats()">🔄 Refresh</button>
+                <button class="btn" style="border-color:var(--border-hover);color:var(--text-2)"
+                    onclick="closeOverlay('ov-stats')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+     JAVASCRIPT
+================================================================ -->
+    <script>
+        // ──────────────────────────────────────────────
+        //  State
+        // ──────────────────────────────────────────────
+        let ws = null;
+        let selectedNodeId = null;
+        let nodeInfoMap = {};   // id → { gradient, rssi, hop, age, ... }
+        let lastUpdateTime = null;
+        let updateTimer = null;
+        let testRunning = false;
+
+        // ──────────────────────────────────────────────
+        //  vis.js Network
+        // ──────────────────────────────────────────────
+        const nodesDS = new vis.DataSet();
+        const edgesDS = new vis.DataSet();
+
+        const network = new vis.Network(
+            document.getElementById('mynetwork'),
+            { nodes: nodesDS, edges: edgesDS },
+            {
+                nodes: {
+                    shape: 'dot', size: 22,
+                    font: { size: 12, color: '#C8E4FF', face: 'JetBrains Mono,monospace', bold: true },
+                    borderWidth: 2,
+                    shadow: { enabled: true, color: 'rgba(0,212,255,0.3)', size: 12 }
+                },
+                edges: {
+                    font: {
+                        size: 10, align: 'middle', color: '#3A5570',
+                        strokeWidth: 3, strokeColor: '#030710', multi: 'html'
+                    },
+                    smooth: { enabled: true, type: 'curvedCW', roundness: 0.15 },
+                    arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+                    width: 2
+                },
+                layout: {
+                    hierarchical: {
+                        enabled: true, direction: 'UD', sortMethod: 'directed',
+                        levelSeparation: 180, nodeSpacing: 160
+                    }
+                },
+                physics: {
+                    hierarchicalRepulsion: {
+                        centralGravity: 0, springLength: 130,
+                        springConstant: 0.01, nodeDistance: 175, damping: 0.09
+                    },
+                    solver: 'hierarchicalRepulsion'
+                },
+                interaction: { hover: true, tooltipDelay: 150, selectConnectedEdges: true }
+            }
+        );
+
+        // Double-click → select node + context menu
+        network.on('doubleClick', params => {
+            if (params.nodes.length > 0) {
+                const id = params.nodes[0];
+                selectNode(id);
+                showMenu(params.event.center.x, params.event.center.y);
+            } else {
+                closeMenu();
+            }
+        });
+        network.on('click', () => closeMenu());
+        network.on('oncontext', p => p.event.preventDefault());
+
+        // ──────────────────────────────────────────────
+        //  Node Selection
+        // ──────────────────────────────────────────────
+        function selectNode(id) {
+            selectedNodeId = id;
+            const info = nodeInfoMap[id] || {};
+            const isGW = info.gradient === 0;
+
+            // Show/hide cards
+            document.getElementById('node-card').style.display = 'block';
+            document.getElementById('node-hint').style.display = 'none';
+
+            // Populate
+            document.getElementById('ctx-addr-txt').textContent = '0x' + id;
+            document.getElementById('nd-addr').textContent = '0x' + id;
+            
+            renderFocusedSensors(id);
+
+            const roleBadge = document.getElementById('node-role');
+            roleBadge.textContent = isGW ? '⭐ GATEWAY' : '📡 SENSOR';
+            roleBadge.className = 'role-badge ' + (isGW ? 'role-gw' : 'role-sn');
+
+            // Disable buttons for gateway
+            document.querySelectorAll('#node-card button').forEach(b => b.disabled = isGW);
+
+            // Update overlay targets
+            document.getElementById('ov-int-target').textContent = '0x' + id;
+            document.getElementById('ov-bp-target').textContent = '0x' + id;
+        }
+
+        // ──────────────────────────────────────────────
+        //  Context Menu
+        // ──────────────────────────────────────────────
+        function showMenu(x, y) {
+            const menu = document.getElementById('ctx-menu');
+            menu.classList.add('open');
+            const vw = window.innerWidth, vh = window.innerHeight;
+            menu.style.left = Math.min(x, vw - 215) + 'px';
+            menu.style.top = Math.min(y, vh - 210) + 'px';
+        }
+
+        function closeMenu() { document.getElementById('ctx-menu').classList.remove('open'); }
+
+        window.addEventListener('click', e => {
+            if (!e.target.closest('#ctx-menu')) closeMenu();
+        });
+
+        // ──────────────────────────────────────────────
+        //  Overlays
+        // ──────────────────────────────────────────────
+        function openOverlay(id) {
+            closeMenu();
+            const ov = document.getElementById(id);
+            ov.classList.add('open');
+            const inp = ov.querySelector('.form-input');
+            if (inp) { inp.value = ''; inp.classList.remove('err'); setTimeout(() => inp.focus(), 80); }
+        }
+
+        function closeOverlay(id) {
+            document.getElementById(id).classList.remove('open');
+        }
+
+        // Close on backdrop click or Escape
+        document.querySelectorAll('.overlay').forEach(ov => {
+            ov.addEventListener('click', e => { if (e.target === ov) ov.classList.remove('open'); });
+        });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
+                closeMenu();
+            }
+        });
+
+        // ──────────────────────────────────────────────
+        //  WebSocket Commands
+        // ──────────────────────────────────────────────
+        function sendWS(payload) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('err', 'Not connected to Gateway');
+                return false;
+            }
+            ws.send(JSON.stringify(payload));
+            return true;
+        }
+
+        function globalCmd(action) {
+            if (!sendWS({ action })) return;
+            const labels = {
+                topo_req: 'Topology request broadcast',
+                report_start: 'Stress test started',
+                report_stop: 'Stress test stopped',
+                sdn_reset: 'SDN Network Reset broadcast',
+                stats_reset: 'Stats counters reset',
+            };
+            addLog('ok', labels[action] || action);
+
+            if (action === 'report_start') { testRunning = true; updateTestBadge(); }
+            if (action === 'report_stop') { testRunning = false; updateTestBadge(); }
+        }
+
+        function confirmStartTest() {
+            const elDur = document.getElementById('inp-test-duration');
+            const elFreq = document.getElementById('inp-test-interval');
+            const dur = parseInt(elDur.value, 10) || 300;
+            const freq = parseInt(elFreq.value, 10) || 2000;
+
+            if (isNaN(dur) || dur < 10) { elDur.classList.add('err'); elDur.focus(); return; }
+            if (isNaN(freq) || freq < 200) { elFreq.classList.add('err'); elFreq.focus(); return; }
+
+            if (!sendWS({
+                action: 'report_start',
+                duration: dur,
+                interval: freq
+            })) return;
+
+            addLog('ok', `Started test: ${dur}s duration, ${freq}ms interval`);
+            testRunning = true;
+            updateTestBadge();
+            closeOverlay('ov-test-config');
+        }
+
+        function nodeCmd(action) {
+            if (!selectedNodeId || !sendWS({ action, target: selectedNodeId })) return;
+            const labels = {
+                attention: `Attention mode → 0x${selectedNodeId}`,
+                stress_dl: `DL Stress Test → 0x${selectedNodeId}`,
+            };
+            addLog('ok', labels[action] || `${action} → 0x${selectedNodeId}`);
+            closeMenu();
+        }
+
+        function requestStats() {
+            sendWS({ action: 'get_stats' });
+            addLog('inf', 'Stats requested from gateway');
+        }
+
+        // ── Interval (single node) ──
+        function applyInterval() {
+            const inp = document.getElementById('inp-interval');
+            const v = parseInt(inp.value, 10);
+            if (isNaN(v) || v < 1 || v > 65535) { inp.classList.add('err'); inp.focus(); return; }
+            if (!selectedNodeId) return;
+            if (!sendWS({ action: 'set_sensor_interval', target: selectedNodeId, interval: v })) return;
+            addLog('ok', `sensor_interval 0x${selectedNodeId} → ${v}s`);
+            closeOverlay('ov-interval');
+        }
+
+        // ── Interval (all) ──
+        function applyIntervalAll() {
+            const inp = document.getElementById('inp-iall');
+            const v = parseInt(inp.value, 10);
+            if (isNaN(v) || v < 1 || v > 65535) { inp.classList.add('err'); inp.focus(); return; }
+            if (!sendWS({ action: 'sensor_interval_all', interval: v })) return;
+            addLog('ok', `sensor_interval_all → ${v}s (broadcast to all)`);
+            closeOverlay('ov-iall');
+        }
+
+        // ── Backprop ──
+        function applyBackprop() {
+            const inp = document.getElementById('inp-payload');
+            const v = parseInt(inp.value, 10);
+            if (isNaN(v) || v < 0 || v > 65535) { inp.classList.add('err'); inp.focus(); return; }
+            if (!selectedNodeId) return;
+            if (!sendWS({ action: 'backprop', target: selectedNodeId, payload: v })) return;
+            addLog('ok', `backprop → 0x${selectedNodeId}, payload=${v}`);
+            closeOverlay('ov-backprop');
+        }
+
+        // Keyboard shortcuts for inputs
+        [
+            ['inp-interval', applyInterval],
+            ['inp-iall', applyIntervalAll],
+            ['inp-payload', applyBackprop],
+        ].forEach(([id, fn]) => {
+            const el = document.getElementById(id);
+            el.addEventListener('keydown', e => {
+                el.classList.remove('err');
+                if (e.key === 'Enter') fn();
+            });
+        });
+
+        // ──────────────────────────────────────────────
+        //  Test Status Badge
+        // ──────────────────────────────────────────────
+        function updateTestBadge() {
+            const badge = document.getElementById('test-status');
+            if (testRunning) {
+                badge.className = 'running';
+                badge.innerHTML = '<span class="spin">⟳</span> Test Running...';
+            } else {
+                badge.className = 'idle';
+                badge.innerHTML = '● Test: Idle';
+            }
+        }
+
+        // ──────────────────────────────────────────────
+        //  Activity Log
+        // ──────────────────────────────────────────────
+        function addLog(type, msg) {
+            const list = document.getElementById('log-list');
+            const ts = new Date().toTimeString().slice(0, 8);
+            const icon = type === 'ok' ? '✓' : type === 'err' ? '✗' : '•';
+            const cls = { ok: 'log-ok', err: 'log-err', inf: 'log-inf' }[type] || 'log-inf';
+
+            const item = document.createElement('div');
+            item.className = 'log-item';
+            item.innerHTML = `<span class="log-ts">${ts}</span><span class="log-msg">${msg}</span><span class="${cls}">${icon}</span>`;
+
+            list.insertBefore(item, list.firstChild);
+            while (list.children.length > 60) list.removeChild(list.lastChild);
+        }
+
+        function clearLog() {
+            document.getElementById('log-list').innerHTML = '';
+            addLog('inf', 'Log cleared');
+        }
+
+        // ──────────────────────────────────────────────
+        //  Graph Update
+        // ──────────────────────────────────────────────
+        const GRAD_COLORS = ['#FFD700', '#00D4FF', '#7B61FF', '#00E676', '#FF6B35', '#FF4455'];
+        const GRAD_GLOW = ['rgba(255,215,0,.35)', 'rgba(0,212,255,.28)', 'rgba(123,97,255,.28)', 'rgba(0,230,118,.28)', 'rgba(255,107,53,.28)', 'rgba(255,68,85,.28)'];
+
+        function updateGraph(data) {
+            const rawNodes = data.nodes || [];
+            const rawEdges = data.edges || [];
+
+            const newNodes = rawNodes.map(n => {
+                const grad = n.gradient !== undefined ? n.gradient : 1;
+
+                // Cache node info
+                if (!nodeInfoMap[n.id]) nodeInfoMap[n.id] = {};
+                const nfo = nodeInfoMap[n.id];
+                if (n.gradient !== undefined) nfo.gradient = n.gradient;
+                if (n.hop !== undefined) nfo.hop = n.hop;
+                if (n.age !== undefined) nfo.age = n.age;
+                if (n.drop_rate !== undefined) nfo.drop_rate = n.drop_rate;
+                if (n.pin !== undefined) nfo.pin = n.pin;
+                if (n.uptime !== undefined) nfo.uptime = n.uptime;
+
+                const gi = Math.min(grad, GRAD_COLORS.length - 1);
+                const col = GRAD_COLORS[gi];
+                const glow = GRAD_GLOW[gi];
+                const size = grad === 0 ? 30 : 20;
+
+                return {
+                    ...n,
+                    color: {
+                        background: col + '22',
+                        border: col,
+                        highlight: { background: col + '44', border: '#FFFFFF' },
+                        hover: { background: col + '33', border: col }
+                    },
+                    size,
+                    shadow: { enabled: true, color: glow, size: 14 },
+                    font: { color: '#D0E8FF', size: grad === 0 ? 13 : 12, bold: true, face: 'JetBrains Mono,monospace' }
+                };
+            });
+
+            const newEdges = rawEdges.map(e => {
+                const baseCol = e.dashes ? 'rgba(60,90,120,.20)' : (e.color || '#00D4FF');
+                return {
+                    ...e,
+                    id: e.id || (e.from + '-' + e.to),
+                    color: { color: baseCol, highlight: '#00FFFF', hover: '#00FFFF' },
+                    width: e.dashes ? 1 : 2
+                };
+            });
+
+            // Diff-update DataSets
+            const existN = nodesDS.getIds(), inN = newNodes.map(n => n.id);
+            nodesDS.remove(existN.filter(i => !inN.includes(i)));
+            nodesDS.update(newNodes);
+
+            const existE = edgesDS.getIds(), inE = newEdges.map(e => e.id);
+            edgesDS.remove(existE.filter(i => !inE.includes(i)));
+            edgesDS.update(newEdges);
+
+            // Header stats
+            document.getElementById('stat-nodes').textContent = newNodes.length;
+            document.getElementById('stat-edges').textContent = newEdges.filter(e => !e.dashes).length;
+
+            // Start update age timer
+            lastUpdateTime = Date.now();
+            if (!updateTimer) {
+                updateTimer = setInterval(() => {
+                    if (!lastUpdateTime) return;
+                    const s = Math.floor((Date.now() - lastUpdateTime) / 1000);
+                    document.getElementById('stat-updated').textContent = s < 2 ? 'now' : s + 's ago';
+                }, 1000);
+            }
+
+            // Refresh selected node panel
+            if (selectedNodeId && nodeInfoMap[selectedNodeId]) selectNode(selectedNodeId);
+        }
+
+        function formatUptime(s) {
+            if (s === undefined || s === '?' || s === null) return '—';
+            const sec = parseInt(s);
+            if (isNaN(sec)) return s;
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            const sc = sec % 60;
+            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${sc.toString().padStart(2, '0')}`;
+        }
+
+        // ──────────────────────────────────────────────
+        //  WS Message Handler
+        // ──────────────────────────────────────────────
+        function handleMsg(payload) {
+            // Graph data
+            if (payload.nodes !== undefined || payload.edges !== undefined) {
+                updateGraph(payload);
+            } else if (payload.before) {
+                updateGraph(payload.before);
+            }
+
+            // Stats response
+            if (payload.type === 'stats') {
+                const s = payload;
+                document.getElementById('st-beacon').textContent = s.gradient_beacon_tx ?? '—';
+                document.getElementById('st-hb').textContent = s.heartbeat_tx ?? '—';
+                document.getElementById('st-data').textContent = s.data_tx ?? '—';
+                document.getElementById('st-ovhd').textContent = s.control_overhead != null ? s.control_overhead + '%' : '—';
+            }
+
+            // Event messages
+            if (payload.type === 'sensor_data') {
+                updateSensorDashboard(payload);
+            }
+
+            // Event messages
+            if (payload.type === 'event') {
+                addLog('inf', payload.message);
+            }
+        }
+
+        // ──────────────────────────────────────────────
+        //  WebSocket
+        // ──────────────────────────────────────────────
+        function connect() {
+            const host = window.location.hostname || 'localhost';
+            ws = new WebSocket(`ws://${host}:8000/ws`);
+
+            ws.onopen = () => {
+                const badge = document.getElementById('ws-badge');
+                badge.className = 'connected';
+                document.getElementById('ws-dot').classList.add('pulse');
+                document.getElementById('ws-text').textContent = 'Connected';
+                addLog('inf', 'Connected to Gateway');
+            };
+
+            ws.onmessage = e => {
+                try { handleMsg(JSON.parse(e.data)); }
+                catch (err) { console.error(err); }
+            };
+
+            ws.onclose = () => {
+                const badge = document.getElementById('ws-badge');
+                badge.className = 'disconnected';
+                document.getElementById('ws-dot').classList.remove('pulse');
+                document.getElementById('ws-text').textContent = 'Disconnected';
+                addLog('err', 'Connection lost — retrying in 2s');
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = () => ws.close();
+        }
+
+        /* ======================================================
+           Sensor Dashboard Logic
+        ====================================================== */
+        const sensorDataMap = new Map(); // Store latest data per node
+
+        function getSensorInfo(id) {
+            const catalog = {
+                1: { name: `ID: ${id}`, color: "#4488FF" },
+                2: { name: `ID: ${id}`, color: "#A0A0A0" },
+                3: { name: `ID: ${id}`, color: "#FF55FF" },
+                4: { name: `ID: ${id}`, color: "#FF4400" },
+                5: { name: `ID: ${id}`, color: "#FFD700" },
+                13: { name: `ID: ${id}`, color: "#FF4444" },
+                14: { name: `ID: ${id}`, color: "#00D4FF" }
+            };
+            return catalog[id] || { name: `ID: ${id}`, color: "var(--primary)" };
+        }
+
+        function updateSensorDashboard(data) {
+            const { addr, ts, sensors } = data;
+            sensorDataMap.set(addr, { ts, sensors });
+
+            // If the updated node is the one currently selected, refresh the panel
+            if (selectedNodeId === addr) {
+                renderFocusedSensors(addr);
+            }
+        }
+
+        function renderFocusedSensors(id) {
+            const container = document.getElementById('sensor-list-focused');
+            const data = sensorDataMap.get(id);
+
+            if (!data) {
+                container.innerHTML = '<div style="font-size: 11px; color: var(--text-3); font-style: italic;">No telemetry received yet</div>';
+                return;
+            }
+
+            let html = '';
+            data.sensors.forEach(s => {
+                const info = getSensorInfo(s.id);
+                html += `
+                    <div style="background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 8px 12px; display: flex; align-items: center; justify-content: space-between;">
+                        <div style="display: flex; flex-direction: column; gap: 2px;">
+                            <div style="font-size: 11px; font-weight: 700; color: var(--primary); font-family: var(--font-mono)">${info.name}</div>
+                            <div style="font-size: 8px; color: var(--text-3)">TELEMETRY CH</div>
+                        </div>
+                        <div style="text-align: right">
+                            <div style="font-family: var(--font-mono); font-size: 16px; font-weight: 700; color: ${info.color}">${s.val}</div>
+                            <div style="font-size: 8px; color: var(--text-3)">${data.ts}</div>
+                        </div>
+                    </div>
+                `;
+            });
+            container.innerHTML = html;
+        }
+
+        connect();
+    </script>
+</body>
+
+</html>

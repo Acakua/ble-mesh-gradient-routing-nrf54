@@ -7,13 +7,16 @@
 
 #include "data_forward.h"
 #include "gradient_work.h"
+#include "heartbeat.h"
 #include "led_indication.h"
 #include "neighbor_table.h"
 #include "packet_stats.h"
 #include "reverse_routing.h"
 #include "routing_policy.h"
+#include <zephyr/bluetooth/mesh/statistic.h>
 #include <zephyr/kernel.h>
 #include <zephyr/random/random.h>
+
 
 LOG_MODULE_REGISTER(gradient_srv, LOG_LEVEL_INF);
 
@@ -54,6 +57,21 @@ extern uint32_t g_test_start_time;
 /* -------------------------------------------------------------------------
  * HELPER FUNCTIONS
  * ------------------------------------------------------------------------- */
+static int srv_send_msg_with_stat(struct bt_mesh_gradient_srv *srv,
+                                  struct bt_mesh_msg_ctx *ctx,
+                                  struct net_buf_simple *msg) {
+  int err = bt_mesh_model_send(srv->model, ctx, msg, NULL, NULL);
+
+  /* If send fails at Application level (Buffer Full, Queue Full, etc.)
+   * increment Soft Drop counter. We ignore -EAGAIN as it's often transient
+   * but -ENOMEM or -EBUSY are definitive drops in this context. */
+  if (err && err != -EAGAIN) {
+    srv->soft_drop_count++;
+    LOG_DBG("Soft Drop detected (err %d), total: %u", err, srv->soft_drop_count);
+  }
+
+  return err;
+}
 
 /******************************************************************************/
 /* Message Handlers                                                           */
@@ -166,7 +184,7 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
   /* Logging Logic */
   if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
-    LOG_INF("[CONTROL - Heartbeat] Recv from 0x%04x (via 0x%04x), Hops: %d",
+    LOG_INF("[CONTROL - SensorData] Recv from 0x%04x (via 0x%04x), Hops: %d",
             original_source, sender_addr, hop_count);
   } else {
     LOG_INF("[DATA - Sensor] Recv from 0x%04x (via 0x%04x), Seq: %d, Hops: %d, "
@@ -177,7 +195,8 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
   int64_t now = k_uptime_get();
 
-  /* [ROBUST RRT] Update/Add RRT route for ANY Uplink message (Data/Heartbeat) */
+  /* [ROBUST RRT] Update/Add RRT route for ANY Uplink message (Data/Heartbeat)
+   */
   rrt_update_from_uplink_msg(gradient_srv, sender_addr, original_source, rssi,
                              now);
 
@@ -191,19 +210,18 @@ static int handle_data_message(const struct bt_mesh_model *model,
 
     /* [MODIFIED] Log thêm Delay vào CSV (Chỉ log khi phiên test đang chạy) */
     if (pkt_stats_is_enabled()) {
+      char csv_buf[128];
       if (received_data == BT_MESH_GRADIENT_SRV_HEARTBEAT_MARKER) {
-        /* [UPDATED] Format: TYPE, Src, Sender, Hops, DelayMs */
-        printk("CSV_LOG,HEARTBEAT,0x%04x,0x%04x,%d,%u\n", original_source,
-               sender_addr, hop_count, delay_ms);
+        snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,SENSOR_DATA,0x%04x,0x%04x,%d,%d",
+                 original_source, sender_addr, hop_count, delay_ms);
+        printk("%s\n", csv_buf);
       } else {
-        /* [NEW] Cập nhật với RSSI chặng cuối cùng về Sink */
         if (rssi < path_min_rssi) {
           path_min_rssi = rssi;
         }
-        /* [UPDATED] Format: TYPE, Src, Sender, Seq, Hops, DummyDelay,
-         * PathMinRSSI */
-        printk("CSV_LOG,DATA,0x%04x,0x%04x,%d,%d,0,%d\n", original_source,
-               sender_addr, received_data, hop_count, path_min_rssi);
+        snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,DATA,0x%04x,0x%04x,%d,%d,0,%d",
+                 original_source, sender_addr, received_data, hop_count, path_min_rssi);
+        printk("%s\n", csv_buf);
 
         /* [NEW] Send PONG back to original source */
         bt_mesh_gradient_srv_send_pong(gradient_srv, original_source,
@@ -280,14 +298,28 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
     } else if (payload == 0xFFFD) {
       LOG_INF("[CONTROL] Received STATS RESET (via Backprop)!");
       pkt_stats_reset();
+    } else if (payload == 0xFFFC) {
+      LOG_INF("[CONTROL] Received ATTENTION MODE (via Backprop)!");
+      if (gradient_srv->handlers->data_received) {
+        gradient_srv->handlers->data_received(gradient_srv, payload);
+      }
+    } else if ((payload & 0x8000) == 0x8000 && payload < 0xFF00) {
+      /* [PHASE 1] Unicast Backprop SDN Route Update (Exclude special range 0xFF00+) */
+      uint16_t new_nexthop = payload & 0x7FFF;
+      LOG_WRN("[SDN 2PC] RX Unicast Route! Pending NextHop = 0x%04x", new_nexthop);
+      gradient_srv->sdn_next_hop_pending = new_nexthop;
+      
+      /* [NEW] Update expiry on route reception (5 minute TTL) */
+      gradient_srv->sdn_route_expiry = k_uptime_get() + (5 * 60 * 1000);
     } else {
-      /* [NEW] CSV LOG AT SENSOR FOR DOWNLINK */
-      printk("CSV_LOG,BACKPROP,0x%04x,0x%04x,%d,%d,%u,%d\n", my_addr,
-             sender_addr, payload, hop_count, delay_ms, path_min_rssi);
+      /* [NEW] CSV LOG AT SENSOR FOR DOWNLINK (Atomic) */
+      char csv_buf[120];
+      snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,BACKPROP,0x%04x,0x%04x,%d,%d,%u,%d",
+               my_addr, sender_addr, payload, hop_count, delay_ms, path_min_rssi);
+      printk("%s\n", csv_buf);
 
-      LOG_INF("[CONTROL - Backprop] Destination Reached! Payload: %d, Hops: "
-              "%d, Delay: %u ms",
-              payload, hop_count, delay_ms);
+      LOG_INF("[CONTROL - Backprop] Destination Reached! Payload: %d, Hops: %d",
+              payload, hop_count);
       pkt_stats_inc_rx();
       if (gradient_srv->handlers->data_received) {
         gradient_srv->handlers->data_received(gradient_srv, payload);
@@ -328,7 +360,67 @@ static int handle_backprop_message(const struct bt_mesh_model *model,
       .send_rel = true, /* [FIX] Reliable delivery for Backprop */
   };
 
-  bt_mesh_model_send(gradient_srv->model, &tx_ctx, &msg, NULL, NULL);
+  srv_send_msg_with_stat(gradient_srv, &tx_ctx, &msg);
+  return 0;
+}
+
+static uint8_t last_processed_bundle_id = 0xFF;
+
+static int handle_backprop_broadcast(const struct bt_mesh_model *model,
+                                     struct bt_mesh_msg_ctx *ctx,
+                                     struct net_buf_simple *buf) {
+  struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+  uint16_t my_addr = bt_mesh_model_elem(model)->rt->addr;
+
+  if (ctx->addr == my_addr) return 0; // Loopback
+  if (buf->len < 1) return -EINVAL;
+
+  uint8_t bundle_id = net_buf_simple_pull_u8(buf);
+  if (bundle_id == last_processed_bundle_id) return 0; // Duplicate
+  
+  last_processed_bundle_id = bundle_id;
+
+  LOG_INF(">>> RX BACKPROP BROADCAST (Bundle: %d) from 0x%04x <<<", bundle_id, ctx->addr);
+
+  // Parse remaining len (must be multiple of 4: Node(2), Nexthop(2))
+  struct net_buf_simple_state state;
+  net_buf_simple_save(buf, &state);
+
+  while (buf->len >= 4) {
+      uint16_t target_node = net_buf_simple_pull_le16(buf);
+      uint16_t nexthop = net_buf_simple_pull_le16(buf);
+      
+      if (target_node == BT_MESH_ADDR_ALL_NODES && nexthop == 0x0000) {
+          /* [NEW] SDN RESET - Clear active and pending routes (Broadcast) */
+          LOG_INF("[SDN 2PC] Received RESET command! Reverting to Gradient.");
+          srv->sdn_next_hop_active = BT_MESH_ADDR_UNASSIGNED;
+          srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED;
+          srv->sdn_route_expiry = 0;
+          pkt_stats_reset();
+      } else if (target_node == my_addr) {
+          LOG_WRN("[SDN 2PC] RX Broadcast Route Update! Pending NextHop = 0x%04x", nexthop);
+          srv->sdn_next_hop_pending = nexthop;
+          /* [NEW] Update expiry (5 minute TTL) */
+          srv->sdn_route_expiry = k_uptime_get() + (5 * 60 * 1000);
+      }
+  }
+
+  net_buf_simple_restore(buf, &state);
+
+  // Re-broadcast
+  if (srv->gradient != 0 && ctx->recv_ttl > 1) {
+      BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, 127);
+      bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST);
+      net_buf_simple_add_u8(&msg, bundle_id);
+      net_buf_simple_add_mem(&msg, buf->data, buf->len);
+
+      struct bt_mesh_msg_ctx send_ctx = {
+          .app_idx = model->keys[0],
+          .addr = BT_MESH_ADDR_ALL_NODES,
+          .send_ttl = ctx->recv_ttl - 1,
+      };
+      (void)srv_send_msg_with_stat(srv, &send_ctx, &msg);
+  }
   return 0;
 }
 
@@ -400,7 +492,7 @@ static int handle_report_req(const struct bt_mesh_model *model,
         .send_ttl = ctx->recv_ttl - 1,
     };
 
-    (void)bt_mesh_model_send(model, &send_ctx, &msg, NULL, NULL);
+    (void)srv_send_msg_with_stat(srv, &send_ctx, &msg);
   }
 
   return 0;
@@ -470,9 +562,11 @@ static int handle_test_start(const struct bt_mesh_model *model,
   /* 3. Cập nhật trạng thái để không xử lý lại */
   last_processed_test_id = received_test_id;
 
+  uint16_t interval_ms = (buf->len >= 2) ? net_buf_simple_pull_le16(buf) : 2000;
+
   /* 4. Notify application to start sending */
   if (srv->handlers->test_start_received) {
-    srv->handlers->test_start_received(srv);
+    srv->handlers->test_start_received(srv, interval_ms);
   }
 
   /* 5. Re-broadcast (Controlled Flooding) */
@@ -483,9 +577,10 @@ static int handle_test_start(const struct bt_mesh_model *model,
 
     LOG_DBG("Re-broadcasting TEST START ID %d...", received_test_id);
 
-    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 1);
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 3);
     bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TEST_START);
     net_buf_simple_add_u8(&msg, received_test_id);
+    net_buf_simple_add_le16(&msg, interval_ms);
 
     struct bt_mesh_msg_ctx send_ctx = {
         .app_idx = model->keys[0],
@@ -493,7 +588,7 @@ static int handle_test_start(const struct bt_mesh_model *model,
         .send_ttl = ctx->recv_ttl - 1,  // Giảm TTL đi 1
     };
 
-    (void)bt_mesh_model_send(model, &send_ctx, &msg, NULL, NULL);
+    (void)srv_send_msg_with_stat(srv, &send_ctx, &msg);
   }
 
   return 0;
@@ -601,7 +696,7 @@ static void report_retry_handler(struct k_work *work) {
     /* [UPDATED] Gửi Report đi nhưng KHÔNG dừng retry ngay lập tức.
      * Chỉ dừng khi nhận được REPORT_ACK từ Sink (xử lý ở handle_report_ack).
      */
-    int err = bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+    int err = srv_send_msg_with_stat(srv, &ctx, &msg);
     if (err) {
       LOG_ERR("Retry %u: Send failed (err %d)", srv->report_retry_count, err);
     }
@@ -650,7 +745,7 @@ static int handle_report_ack(const struct bt_mesh_model *model,
 
     LOG_DBG("Forwarding REPORT_ACK for 0x%04x to Nexthop 0x%04x", target_addr,
             nexthop);
-    bt_mesh_model_send(model, &new_ctx, &msg, NULL, NULL);
+    srv_send_msg_with_stat(srv, &new_ctx, &msg);
   } else {
     LOG_WRN("No route to forward REPORT_ACK for 0x%04x", target_addr);
   }
@@ -682,7 +777,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
   struct bt_mesh_gradient_srv *srv = model->rt->user_data;
 
   /* [ROBUST RRT] Update RRT for Report Response for ALL nodes (Sink & Relays)
-   * This ensures the node forwarding this packet also learns the uplink route. 
+   * This ensures the node forwarding this packet also learns the uplink route.
    */
   rrt_update_from_uplink_msg(srv, ctx->addr, reporter_addr, ctx->recv_rssi,
                              k_uptime_get());
@@ -693,10 +788,11 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
     LOG_INF("SINK received REPORT from 0x%04x (Forwarded by 0x%04x)",
             reporter_addr, ctx->addr);
 
-    // Format log cho Python script (Dùng reporter_addr để định danh đúng node)
-    // [NEW] Format: TYPE, Src, Tx, Beacon, HB, RouteChanges, FwdCount, RxCount
-    printk("CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u,%u,%u\n", reporter_addr, data_tx,
-           beacon_tx, hb_tx, route_changes, data_fwd, rx_count);
+    // Format log cho Python script (Dùng reporter_addr để định danh đúng node) (Atomic)
+    char csv_buf[128];
+    snprintf(csv_buf, sizeof(csv_buf), "CSV_LOG,REPORT,0x%04x,%u,%u,%u,%u,%u,%u",
+             reporter_addr, data_tx, beacon_tx, hb_tx, route_changes, data_fwd, rx_count);
+    printk("%s\n", csv_buf);
 
     /* [NEW] Log Individual RTTs */
     for (int i = 0; i < rtt_samples; i++) {
@@ -722,7 +818,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
           .addr = nexthop,
           .send_ttl = BT_MESH_TTL_DEFAULT,
       };
-      bt_mesh_model_send(model, &ack_ctx, &msg, NULL, NULL);
+      srv_send_msg_with_stat(srv, &ack_ctx, &msg);
       LOG_DBG("Sink sent REPORT_ACK for 0x%04x via Nexthop 0x%04x",
               reporter_addr, nexthop);
     } else {
@@ -764,7 +860,7 @@ static int handle_report_rsp(const struct bt_mesh_model *model,
           .send_rel = true,
       };
 
-      bt_mesh_model_send(model, &fwd_ctx, &msg, NULL, NULL);
+      srv_send_msg_with_stat(srv, &fwd_ctx, &msg);
     } else {
       LOG_ERR("Relay 0x%04x has no PARENT to forward report from 0x%04x!",
               bt_mesh_model_elem(model)->rt->addr, reporter_addr);
@@ -790,6 +886,10 @@ static void topo_poll_handler(struct k_work *work);
 
 /* Sink-side sequence counter for polling sessions (0-15, wraps around) */
 static uint8_t s_topo_seq_counter;
+
+/* [NEW] Accumulator for MAC layer absolute total packets sent 
+ * (Preserved across 30s STAT resets to estimate battery) */
+static uint32_t s_mac_total_sent_accum = 0;
 
 /**
  * @brief Helper: Execute Atomic Snapshot of neighbor table.
@@ -831,6 +931,10 @@ static bool topo_take_snapshot(struct bt_mesh_gradient_srv *srv,
     srv->topo_ctx.snapshot[idx].addr = e->addr;
     srv->topo_ctx.snapshot[idx].rssi = e->rssi;
     srv->topo_ctx.snapshot[idx].grad = e->gradient;
+    /* [NEW] Calculate Link Uptime in seconds */
+    uint32_t uptime_s = (uint32_t)((now - e->first_seen) / 1000);
+    srv->topo_ctx.snapshot[idx].link_uptime =
+        (uint16_t)MIN(uptime_s, UINT16_MAX);
     srv->topo_ctx.total_valid++;
   }
 
@@ -847,8 +951,32 @@ static bool topo_take_snapshot(struct bt_mesh_gradient_srv *srv,
   srv->topo_ctx.current_page = 1;
   srv->topo_ctx.is_reporting = true; /* Lock ON */
 
-  LOG_INF("[TOPO] Snapshot: %d valid neighbors, %d pages, seq=%d",
-          srv->topo_ctx.total_valid, srv->topo_ctx.total_pages, seq_id);
+  /* [NEW] Capture Drops and Fwd Rate from Zephyr MAC once for the entire report session */
+  struct bt_mesh_statistic stats;
+  bt_mesh_stat_get(&stats);
+  
+  uint32_t mac_planned = stats.tx_local_planned + stats.tx_adv_relay_planned;
+  uint32_t mac_succeeded = stats.tx_local_succeeded + stats.tx_adv_relay_succeeded;
+  
+  /* MAC Drops = Planned - Succeeded (with boundary safety clamping) */
+  uint32_t mac_drops = (mac_planned > mac_succeeded) ? (mac_planned - mac_succeeded) : 0;
+  
+  /* Universal Drops = MAC Hardware Drops + Application Soft Drops */
+  uint32_t total_drops = mac_drops + srv->soft_drop_count;
+  
+  srv->topo_ctx.drop_count_snapshot = (uint16_t)MIN(total_drops, 65535);
+  srv->topo_ctx.fwd_rate_snapshot = (uint16_t)MIN(mac_succeeded, 65535);
+
+  /* Absolute Total Sent = Accumulator (from previous resets) + Current statistics window */
+  srv->topo_ctx.total_sent_snapshot = s_mac_total_sent_accum + mac_succeeded;
+  
+  /* Clear local Soft Drop counter for the next window */
+  srv->soft_drop_count = 0;
+
+  LOG_INF("[TOPO] Snapshot: %d valid neighbors, %d pages, seq=%d, Drops:%u, FwdR:%u, TotalSent:%u",
+          srv->topo_ctx.total_valid, srv->topo_ctx.total_pages, seq_id,
+          srv->topo_ctx.drop_count_snapshot, srv->topo_ctx.fwd_rate_snapshot,
+          srv->topo_ctx.total_sent_snapshot);
 
   return true;
 }
@@ -867,13 +995,27 @@ static int handle_topo_req(const struct bt_mesh_model *model,
     return 0;
   }
 
-  /* Extract seq_id from payload (1 byte) */
-  uint8_t seq_id = 0;
+  /* Extract payload (1 byte) */
+  uint8_t payload = 0;
   if (buf->len >= 1) {
-    seq_id = net_buf_simple_pull_u8(buf) & 0x0F;
+    payload = net_buf_simple_pull_u8(buf);
   }
+  
+  uint8_t seq_id = payload & 0x0F;
+  bool is_commit = (payload & 0x80) != 0;
 
-  LOG_INF("[TOPO] RX TOPO_REQ from 0x%04x, seq=%d", ctx->addr, seq_id);
+  LOG_INF("[TOPO] RX TOPO_REQ from 0x%04x, seq=%d, commit=%d", ctx->addr, seq_id, is_commit);
+
+  if (is_commit) {
+      if (srv->sdn_next_hop_pending != BT_MESH_ADDR_UNASSIGNED && srv->sdn_next_hop_pending != 0) {
+          LOG_WRN("[SDN 2PC] COMMIT! Active NextHop updated to 0x%04x", srv->sdn_next_hop_pending);
+          srv->sdn_next_hop_active = srv->sdn_next_hop_pending;
+          srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED; // Reset for next time
+
+          /* [NEW] Visual Feedback: Toggle LED 4 when AI route is committed */
+          led_indicate_sdn_commit();
+      }
+  }
 
   /* 1. Atomic Snapshot (will fail if drip-feed is active) */
   if (!topo_take_snapshot(srv, seq_id)) {
@@ -907,11 +1049,10 @@ static void topo_reply_work_handler(struct k_work *work) {
 
   uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
 
-  /* Find Uplink nexthop (best parent = index 0) */
-  k_mutex_lock(&srv->forwarding_table_mutex, K_FOREVER);
-  uint16_t nexthop = srv->forwarding_table[0].addr;
-  uint16_t parent_addr = nexthop;
-  k_mutex_unlock(&srv->forwarding_table_mutex);
+  /* Find actual nexthop being used for Uplink routing */
+  const neighbor_entry_t *best_parent = find_strict_upstream_parent(srv, BT_MESH_ADDR_UNASSIGNED);
+  uint16_t parent_addr = (best_parent != NULL) ? best_parent->addr : BT_MESH_ADDR_UNASSIGNED;
+  uint16_t nexthop = parent_addr;
 
   if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
     LOG_WRN("[TOPO] No uplink route, aborting drip-feed");
@@ -939,12 +1080,41 @@ static void topo_reply_work_handler(struct k_work *work) {
   net_buf_simple_add_u8(&msg, tctx->current_page); /* Current_Page (1B) */
   net_buf_simple_add_u8(&msg, neighbors_in_page);  /* Neighbors_in_Page (1B) */
 
+  /* [UPD] Drop Count (2B) and Fwd Rate (2B): Use values captured at snapshot time */
+  net_buf_simple_add_le16(&msg, tctx->drop_count_snapshot);
+  net_buf_simple_add_le16(&msg, tctx->fwd_rate_snapshot);
+
+  /* (MAC stats reset only after the full report cycle to ensure continuity) */
+  if (tctx->current_page >= tctx->total_pages) {
+    struct bt_mesh_statistic stats;
+    bt_mesh_stat_get(&stats);
+    uint32_t current_window_succeeded = stats.tx_local_succeeded + stats.tx_adv_relay_succeeded;
+    /* Accumulator = snapshot value + delta sent DURING drip-feed phase.
+     * fwd_rate_snapshot was the mac_succeeded at snapshot time.  
+     * current_window_succeeded includes those PLUS packets sent during drip-feed.
+     * Delta = current_window_succeeded - fwd_rate_snapshot (drip-feed packets only). */
+    uint32_t drip_delta = (current_window_succeeded > tctx->fwd_rate_snapshot) 
+                        ? (current_window_succeeded - tctx->fwd_rate_snapshot) : 0;
+    s_mac_total_sent_accum = tctx->total_sent_snapshot + drip_delta;
+    bt_mesh_stat_reset();
+    LOG_DBG("[TOPO] Report done. Accum=%u (snap=%u + drip=%u)", 
+            s_mac_total_sent_accum, tctx->total_sent_snapshot, drip_delta);
+  }
+
+  /* [NEW] Add Node Uptime (4B) in seconds */
+  uint32_t node_uptime_s = (uint32_t)(k_uptime_get() / 1000);
+  net_buf_simple_add_le32(&msg, node_uptime_s);
+
+  /* [NEW] Add MAC-layer Total Packets Sent (4B) for precise battery estimation */
+  net_buf_simple_add_le32(&msg, tctx->total_sent_snapshot);
+
   /* === Pack neighbor data (max 24B) === */
   for (uint8_t i = 0; i < neighbors_in_page; i++) {
     uint8_t idx = start_idx + i;
     net_buf_simple_add_le16(&msg, tctx->snapshot[idx].addr);
     net_buf_simple_add_u8(&msg, (uint8_t)tctx->snapshot[idx].rssi);
     net_buf_simple_add_u8(&msg, tctx->snapshot[idx].grad);
+    net_buf_simple_add_le16(&msg, tctx->snapshot[idx].link_uptime);
   }
 
   /* Send Uplink via Gradient Routing (hop-by-hop) */
@@ -955,7 +1125,7 @@ static void topo_reply_work_handler(struct k_work *work) {
       .send_rel = true, /* Segmented + BlockAck */
   };
 
-  int err = bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+  int err = srv_send_msg_with_stat(srv, &ctx, &msg);
   if (err) {
     LOG_ERR("[TOPO] Failed to send page %d/%d, err=%d", tctx->current_page,
             tctx->total_pages, err);
@@ -987,8 +1157,8 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
                            struct net_buf_simple *buf) {
   struct bt_mesh_gradient_srv *srv = model->rt->user_data;
 
-  /* --- Parse 8-byte header --- */
-  if (buf->len < 8) {
+  /* --- Parse 20-byte header --- */
+  if (buf->len < 20) {
     return -EINVAL;
   }
   uint16_t origin_addr = net_buf_simple_pull_le16(buf);
@@ -997,6 +1167,10 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
   uint8_t total_and_seq = net_buf_simple_pull_u8(buf);
   uint8_t current_page = net_buf_simple_pull_u8(buf);
   uint8_t count = net_buf_simple_pull_u8(buf);
+  uint16_t drop_count = net_buf_simple_pull_le16(buf);
+  uint16_t fwd_rate = net_buf_simple_pull_le16(buf);
+  uint32_t node_uptime = net_buf_simple_pull_le32(buf);
+  uint32_t total_sent = net_buf_simple_pull_le32(buf);
 
   /* Unpack seq_id and total_pages from combined byte */
   uint8_t seq_id = (total_and_seq >> 4) & 0x0F;
@@ -1016,34 +1190,36 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     /* ═══════════════════════════════════════════════════════
      * I AM SINK: Parse and print to UART with SOF/EOF
      * Format:
-     * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,[neighbors]
+     * $[TOPO],<Origin>,<Seq>,<TotalPg>,<CurPg>,<Count>,<My_Grad>,<My_Parent>,<Drops>,<FwdRate>,<Uptime>s,<TotalSent>,[neighbors]
      * ═══════════════════════════════════════════════════════ */
-    char uart_buf[200];
+    char uart_buf[300];
     int pos = snprintf(uart_buf, sizeof(uart_buf),
-                       "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X", origin_addr, seq_id,
-                       total_pages, current_page, count, grad, parent);
+                       "$[TOPO],%04X,%d,%d,%d,%d,%d,%04X,%u,%u,%u,%u", origin_addr,
+                       seq_id, total_pages, current_page, count, grad, parent,
+                       drop_count, fwd_rate, node_uptime, total_sent);
 
     for (int i = 0; i < count; i++) {
       /* Bounds checking before each pull */
-      if (buf->len < 4) {
+      if (buf->len < 6) {
         break;
       }
       uint16_t n_addr = net_buf_simple_pull_le16(buf);
       int8_t n_rssi = (int8_t)net_buf_simple_pull_u8(buf);
       uint8_t n_grad = net_buf_simple_pull_u8(buf);
+      uint16_t n_uptime = net_buf_simple_pull_le16(buf);
 
       if (pos < sizeof(uart_buf)) {
-        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%04X,%d,%d]",
-                        n_addr, n_rssi, n_grad);
+        pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos,
+                        ",[%04X,%d,%d,%u]", n_addr, n_rssi, n_grad, n_uptime);
       }
     }
     printk("%s\n",
            uart_buf); /* Atomic print to avoid shell prompt interleaving */
 
-    LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, parent=0x%04X, "
-            "via 0x%04X)",
-            current_page, total_pages, origin_addr, seq_id, grad, parent,
-            ctx->addr);
+    LOG_INF("[TOPO] RX page %d/%d from 0x%04X (seq=%d, grad=%d, Drp=%u, FwdR=%u, "
+            "UP:%u, TX:%u, parent=0x%04X via 0x%04x)",
+            current_page, total_pages, origin_addr, seq_id, grad, drop_count, fwd_rate,
+            node_uptime, total_sent, parent, ctx->addr);
   } else {
     /* ═══════════════════════════════════════════════════════
      * I AM RELAY: Forward entire payload to my best parent
@@ -1068,13 +1244,17 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
     net_buf_simple_add_u8(&fwd, total_and_seq); /* Preserve seq+pages */
     net_buf_simple_add_u8(&fwd, current_page);
     net_buf_simple_add_u8(&fwd, count);
+    net_buf_simple_add_le16(&fwd, drop_count);
+    net_buf_simple_add_le16(&fwd, fwd_rate);
+    net_buf_simple_add_le32(&fwd, node_uptime);
+    net_buf_simple_add_le32(&fwd, total_sent);
 
     for (int i = 0; i < count; i++) {
-      if (buf->len < 4) {
+      if (buf->len < 6) {
         break;
       }
-      uint8_t *chunk = net_buf_simple_pull_mem(buf, 4);
-      net_buf_simple_add_mem(&fwd, chunk, 4);
+      uint8_t *chunk = net_buf_simple_pull_mem(buf, 6);
+      net_buf_simple_add_mem(&fwd, chunk, 6);
     }
 
     struct bt_mesh_msg_ctx fwd_ctx = {
@@ -1084,7 +1264,7 @@ static int handle_topo_rep(const struct bt_mesh_model *model,
         .send_rel = true,
     };
 
-    int err = bt_mesh_model_send(model, &fwd_ctx, &fwd, NULL, NULL);
+    int err = srv_send_msg_with_stat(srv, &fwd_ctx, &fwd);
     if (err) {
       LOG_ERR("[TOPO] Relay forward failed, err=%d", err);
     } else {
@@ -1110,7 +1290,7 @@ static void topo_poll_handler(struct k_work *work) {
     return;
   }
 
-  bt_mesh_gradient_srv_send_topo_req(srv);
+  bt_mesh_gradient_srv_send_topo_req(srv, false);
 
   /* Reschedule */
   k_work_reschedule(&srv->topo_poll_work,
@@ -1118,14 +1298,16 @@ static void topo_poll_handler(struct k_work *work) {
 }
 
 /**
- * @brief [PUBLIC] Broadcast OP_TOPO_REQ with Sequence ID.
+ * @brief [PUBLIC] Broadcast OP_TOPO_REQ with Sequence ID and optional Commit Flag.
  */
-int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv) {
+int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv, bool commit_flag) {
   s_topo_seq_counter = (s_topo_seq_counter + 1) & 0x0F; /* Wrap 0-15 */
+  
+  uint8_t payload = (commit_flag ? 0x80 : 0x00) | s_topo_seq_counter;
 
   BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TOPO_REQ, 1);
   bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TOPO_REQ);
-  net_buf_simple_add_u8(&msg, s_topo_seq_counter);
+  net_buf_simple_add_u8(&msg, payload);
 
   struct bt_mesh_msg_ctx ctx = {
       .app_idx = srv->model->keys[0],
@@ -1135,7 +1317,7 @@ int bt_mesh_gradient_srv_send_topo_req(struct bt_mesh_gradient_srv *srv) {
   };
 
   LOG_INF("[TOPO] Broadcasting TOPO_REQ (seq=%d)", s_topo_seq_counter);
-  return bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
 }
 
 /**
@@ -1188,6 +1370,156 @@ void topo_routing_init(struct bt_mesh_gradient_srv *srv) {
   }
 }
 
+/**
+ * @brief [NEW] Handle OP_SENSOR_INTERVAL — Gateway sets per-node sensor data interval.
+ *
+ * Message format (5 bytes):
+ *   dest_addr   (2B LE) — final destination; 0xFFFF = broadcast to all non-sink
+ *   interval_sec (2B LE) — new interval in seconds
+ *   ttl          (1B)   — remaining hops
+ *
+ * Routing logic mirrors BACKPROP_DATA:
+ *   - dest == 0xFFFF  → apply to self (if gradient != 0), done
+ *   - dest == my_addr → apply to self, done
+ *   - dest != my_addr → find nexthop via RRT, forward with TTL-1
+ */
+static int handle_sensor_interval(const struct bt_mesh_model *model,
+                                   struct bt_mesh_msg_ctx *ctx,
+                                   struct net_buf_simple *buf)
+{
+  struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+  uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+
+  /* Parse 5-byte payload */
+  uint16_t dest_addr   = net_buf_simple_pull_le16(buf);
+  uint16_t interval_sec = net_buf_simple_pull_le16(buf);
+  uint8_t  ttl          = net_buf_simple_pull_u8(buf);
+
+  LOG_INF("[SENSOR_INTERVAL] RX: dest=0x%04x, interval=%us, ttl=%u, from=0x%04x",
+          dest_addr, interval_sec, ttl, ctx->addr);
+
+  if (interval_sec == 0) {
+    LOG_WRN("[SENSOR_INTERVAL] Received invalid interval=0, ignoring");
+    return -EINVAL;
+  }
+
+  /* --- Broadcast mode: dest_addr == 0xFFFF --- */
+  if (dest_addr == BT_MESH_ADDR_ALL_NODES) {
+    if (srv->gradient != 0) {
+      /* Non-sink node: apply interval */
+      LOG_INF("[SENSOR_INTERVAL] Broadcast: applying interval=%us", interval_sec);
+      heartbeat_set_interval(interval_sec);
+    }
+    /* Broadcast flooding is handled by BLE Mesh network layer (TTL) — no manual relay */
+    return 0;
+  }
+
+  /* --- Unicast: am I the destination? --- */
+  if (dest_addr == my_addr) {
+    LOG_INF("[SENSOR_INTERVAL] Reached destination: applying interval=%us", interval_sec);
+    heartbeat_set_interval(interval_sec);
+    return 0;
+  }
+
+  /* --- Relay: forward hop-by-hop via RRT --- */
+  if (ttl <= 1) {
+    LOG_WRN("[SENSOR_INTERVAL] TTL exhausted, dropping for dest=0x%04x", dest_addr);
+    return 0;
+  }
+
+  uint16_t nexthop = rrt_find_nexthop(
+      srv->forwarding_table,
+      CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+      dest_addr);
+
+  if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+    LOG_WRN("[SENSOR_INTERVAL] No RRT route to dest=0x%04x", dest_addr);
+    return 0;
+  }
+
+  /* Re-pack and forward with TTL-1 */
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, 5);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL);
+  net_buf_simple_add_le16(&msg, dest_addr);
+  net_buf_simple_add_le16(&msg, interval_sec);
+  net_buf_simple_add_u8(&msg, ttl - 1);
+
+  struct bt_mesh_msg_ctx tx_ctx = {
+      .app_idx  = model->keys[0],
+      .addr     = nexthop,
+      .send_ttl = 0,
+      .send_rel = true,
+  };
+
+  LOG_INF("[SENSOR_INTERVAL] Relaying to nexthop=0x%04x (TTL %u→0)", nexthop, ttl - 1);
+  return srv_send_msg_with_stat(srv, &tx_ctx, &msg);
+}
+
+/**
+ * @brief [NEW] Handle OP_SENSOR_DATA — Uplink multi-sensor telemetry.
+ */
+static int handle_sensor_data(const struct bt_mesh_model *model,
+                               struct bt_mesh_msg_ctx *ctx,
+                               struct net_buf_simple *buf) {
+  struct bt_mesh_gradient_srv *srv = model->rt->user_data;
+  uint16_t sender_addr = ctx->addr;
+  int8_t rssi = ctx->recv_rssi;
+
+  if (buf->len < 3) return -EINVAL;
+  
+  uint16_t original_source = net_buf_simple_pull_le16(buf);
+  uint8_t count = net_buf_simple_pull_u8(buf);
+  
+  /* Update RRT */
+  rrt_update_from_uplink_msg(srv, sender_addr, original_source, rssi, k_uptime_get());
+
+  if (srv->gradient == 0) {
+      /* SINK: Log for Gateway */
+      char uart_buf[256];
+      int pos = snprintf(uart_buf, sizeof(uart_buf), "$[SENSOR],0x%04X,%d", original_source, count);
+      for (int i = 0; i < count; i++) {
+          if (buf->len < 3) break;
+          uint8_t id = net_buf_simple_pull_u8(buf);
+          int16_t val = net_buf_simple_pull_le16(buf);
+          if (pos < sizeof(uart_buf)) {
+              pos += snprintf(uart_buf + pos, sizeof(uart_buf) - pos, ",[%d,%d]", id, val);
+          }
+      }
+      printk("%s\n", uart_buf);
+      led_indicate_sink_received();
+  } else {
+      /* RELAY: Forward via parent */
+      const neighbor_entry_t *parent = find_strict_upstream_parent(srv, original_source);
+      if (!parent) {
+          LOG_WRN("[SENSOR] No parent for 0x%04x", original_source);
+          return 0;
+      }
+
+      BT_MESH_MODEL_BUF_DEFINE(fwd, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA, 64);
+      bt_mesh_model_msg_init(&fwd, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA);
+      net_buf_simple_add_le16(&fwd, original_source);
+      net_buf_simple_add_u8(&fwd, count);
+      
+      for (int i = 0; i < count; i++) {
+          /* Mỗi entry gồm 1 byte ID + 2 bytes Value = 3 bytes */
+          if (buf->len < 3) {
+              LOG_WRN("[SENSOR] Truncated packet from 0x%04x", original_source);
+              break;
+          }
+          net_buf_simple_add_u8(&fwd, net_buf_simple_pull_u8(buf));
+          net_buf_simple_add_le16(&fwd, net_buf_simple_pull_le16(buf));
+      }
+      
+      struct bt_mesh_msg_ctx tx_ctx = {
+          .app_idx = model->keys[0],
+          .addr = parent->addr,
+          .send_ttl = 0,
+      };
+      srv_send_msg_with_stat(srv, &tx_ctx, &fwd);
+  }
+  return 0;
+}
+
 /******************************************************************************/
 /* Model Operations                                                           */
 /******************************************************************************/
@@ -1222,10 +1554,14 @@ const struct bt_mesh_model_op _bt_mesh_gradient_srv_op[] = {
     /* [NEW] Topology Reporting Opcodes (Multi-Page v5) */
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REQ, BT_MESH_LEN_MIN(1), handle_topo_req},
     {BT_MESH_GRADIENT_SRV_OP_TOPO_REP,
-     BT_MESH_LEN_MIN(
-         8), /* Header: Origin(2)+Grad(1)+Parent(2)+SeqPg(1)+CurPg(1)+Count(1)
-              */
+     BT_MESH_LEN_MIN(20), /* 20B header (no neighbors) */
      handle_topo_rep},
+    {BT_MESH_GRADIENT_SRV_OP_BACKPROP_BROADCAST, BT_MESH_LEN_MIN(5), /* 1B ID + at least 1 pair(4B) */
+     handle_backprop_broadcast},
+    /* [NEW] Sensor Interval: Gateway sets per-node sensor data TX interval */
+    {BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, BT_MESH_LEN_EXACT(5), handle_sensor_interval},
+    /* [NEW] Sensor Data: Uplink telemetry */
+    {BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA, BT_MESH_LEN_MIN(5), handle_sensor_data},
     BT_MESH_MODEL_OP_END,
 };
 
@@ -1280,7 +1616,7 @@ static int handle_pong_message(const struct bt_mesh_model *model,
           .addr = nexthop,
           .send_ttl = BT_MESH_TTL_DEFAULT,
       };
-      bt_mesh_model_send(model, &fwd_ctx, &msg, NULL, NULL);
+      srv_send_msg_with_stat(srv, &fwd_ctx, &msg);
     } else {
       LOG_WRN("PONG Forward Failed: No route to 0x%04x", target_addr);
     }
@@ -1315,7 +1651,7 @@ int bt_mesh_gradient_srv_send_pong(struct bt_mesh_gradient_srv *srv,
 
   LOG_DBG("Sending PONG (Seq %u) for 0x%04x via Nexthop 0x%04x", seq, dest_addr,
           nexthop);
-  return bt_mesh_model_send(srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
 }
 
 static int
@@ -1352,6 +1688,10 @@ static int bt_mesh_gradient_srv_init(const struct bt_mesh_model *model) {
   k_work_init_delayable(&gradient_srv->report_retry_work, report_retry_handler);
   gradient_srv->is_report_pending = false;
   gradient_srv->report_retry_count = 0;
+  gradient_srv->soft_drop_count = 0;
+  gradient_srv->sdn_next_hop_active = BT_MESH_ADDR_UNASSIGNED;
+  gradient_srv->sdn_next_hop_pending = BT_MESH_ADDR_UNASSIGNED;
+  gradient_srv->sdn_route_expiry = 0;
 
   net_buf_simple_init_with_data(&gradient_srv->pub_msg, gradient_srv->buf,
                                 sizeof(gradient_srv->buf));
@@ -1467,7 +1807,7 @@ int bt_mesh_gradient_srv_backprop_send(
       .send_rel = true, /* [FIX] Reliable delivery for Backprop */
   };
 
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
 
 /**
@@ -1494,33 +1834,31 @@ int bt_mesh_gradient_srv_send_report_req(
   };
 
   LOG_INF(">>> BROADCASTING REPORT REQUEST (ID: %d) <<<", current_tx_req_id);
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
 
-/**
- * @brief [UPDATED] Gửi lệnh TEST START xuống toàn mạng (Controlled Flooding)
- */
-int bt_mesh_gradient_srv_send_test_start(
-    struct bt_mesh_gradient_srv *gradient_srv, bool force_new_id) {
-  /* 1. Tăng ID cho lần gửi mới nếu được yêu cầu */
-  if (force_new_id) {
-    current_tx_test_id++;
-  }
+int bt_mesh_gradient_srv_send_test_start(struct bt_mesh_gradient_srv *srv, bool force_new_id, uint16_t interval_ms)
+{
+	struct bt_mesh_msg_ctx ctx = {
+		.app_idx = srv->model->keys[0],
+		.addr = BT_MESH_ADDR_ALL_NODES,
+		.send_ttl = BT_MESH_GRADIENT_SRV_DEFAULT_TTL,
+	};
 
-  /* 2. Tạo gói tin có payload là Test ID (1 byte) */
-  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 1);
-  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TEST_START);
-  net_buf_simple_add_u8(&msg, current_tx_test_id);
+	BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_TEST_START, 3);
+	bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_TEST_START);
 
-  /* 3. Gửi Broadcast với TTL mặc định */
-  struct bt_mesh_msg_ctx ctx = {
-      .app_idx = gradient_srv->model->keys[0],
-      .addr = BT_MESH_ADDR_ALL_NODES,
-      .send_ttl = BT_MESH_TTL_DEFAULT,
-  };
+	if (force_new_id) {
+		current_tx_test_id++;
+		if (current_tx_test_id == 0xFF) {
+			current_tx_test_id = 0;
+		}
+	}
 
-  LOG_INF(">>> BROADCASTING TEST START (ID: %d) <<<", current_tx_test_id);
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+	net_buf_simple_add_u8(&msg, current_tx_test_id);
+	net_buf_simple_add_le16(&msg, interval_ms);
+
+	return srv_send_msg_with_stat(srv, &ctx, &msg);
 }
 
 /**
@@ -1566,5 +1904,116 @@ int bt_mesh_gradient_srv_send_downlink_report(
 
   LOG_INF("Sending Downlink Report to 0x%04x (via 0x%04x), TX: %u", dest_addr,
           nexthop, total_tx);
-  return bt_mesh_model_send(gradient_srv->model, &ctx, &msg, NULL, NULL);
+  return srv_send_msg_with_stat(gradient_srv, &ctx, &msg);
 }
+
+/**
+ * @brief [NEW] Send OP_SENSOR_INTERVAL to set per-node sensor data interval.
+ *
+ * Unicast mode (dest_addr != 0xFFFF):
+ *   Looks up nexthop in RRT and sends hop-by-hop to destination.
+ *
+ * Broadcast mode (dest_addr == 0xFFFF):
+ *   Sends to BT_MESH_ADDR_ALL_NODES — BLE Mesh network layer handles flooding.
+ *   All non-sink nodes will apply the interval upon reception.
+ */
+int bt_mesh_gradient_srv_send_sensor_interval(
+    struct bt_mesh_gradient_srv *srv,
+    uint16_t dest_addr,
+    uint16_t interval_sec)
+{
+  if (interval_sec == 0) {
+    LOG_WRN("[SENSOR_INTERVAL] interval_sec cannot be 0");
+    return -EINVAL;
+  }
+
+  uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+
+  /* --- Broadcast mode: send to ALL_NODES --- */
+  if (dest_addr == BT_MESH_ADDR_ALL_NODES) {
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, 5);
+    bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL);
+    net_buf_simple_add_le16(&msg, BT_MESH_ADDR_ALL_NODES);
+    net_buf_simple_add_le16(&msg, interval_sec);
+    net_buf_simple_add_u8(&msg, BT_MESH_TTL_DEFAULT);
+
+    struct bt_mesh_msg_ctx ctx = {
+        .app_idx  = srv->model->keys[0],
+        .addr     = BT_MESH_ADDR_ALL_NODES,
+        .send_ttl = BT_MESH_TTL_DEFAULT,
+        .send_rel = false,
+    };
+
+    LOG_INF("[SENSOR_INTERVAL] Broadcast interval=%us to ALL_NODES", interval_sec);
+    return srv_send_msg_with_stat(srv, &ctx, &msg);
+  }
+
+  /* --- Unicast mode --- */
+  if (dest_addr == my_addr) {
+    LOG_WRN("[SENSOR_INTERVAL] Cannot send to self");
+    return -EINVAL;
+  }
+
+  uint16_t nexthop = rrt_find_nexthop(
+      srv->forwarding_table,
+      CONFIG_BT_MESH_GRADIENT_SRV_FORWARDING_TABLE_SIZE,
+      dest_addr);
+
+  if (nexthop == BT_MESH_ADDR_UNASSIGNED) {
+    LOG_WRN("[SENSOR_INTERVAL] No RRT route to 0x%04x", dest_addr);
+    return -ENETUNREACH;
+  }
+
+  BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL, 5);
+  bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_INTERVAL);
+  net_buf_simple_add_le16(&msg, dest_addr);
+  net_buf_simple_add_le16(&msg, interval_sec);
+  net_buf_simple_add_u8(&msg, BT_MESH_GRADIENT_SRV_BACKPROP_DEFAULT_TTL);
+
+  struct bt_mesh_msg_ctx ctx = {
+      .app_idx  = srv->model->keys[0],
+      .addr     = nexthop,
+      .send_ttl = 0,
+      .send_rel = true,
+  };
+
+  LOG_INF("[SENSOR_INTERVAL] Unicast interval=%us to 0x%04x via nexthop=0x%04x",
+          interval_sec, dest_addr, nexthop);
+  return srv_send_msg_with_stat(srv, &ctx, &msg);
+}
+
+int bt_mesh_gradient_srv_sensor_data_send(struct bt_mesh_gradient_srv *srv,
+                                          const sensor_packet_t *pkt) {
+    if (!pkt || pkt->count == 0) return -EINVAL;
+
+    const neighbor_entry_t *parent = find_strict_upstream_parent(srv, BT_MESH_ADDR_UNASSIGNED);
+    if (!parent) return -ENETUNREACH;
+
+    BT_MESH_MODEL_BUF_DEFINE(msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA, 64);
+    bt_mesh_model_msg_init(&msg, BT_MESH_GRADIENT_SRV_OP_SENSOR_DATA);
+
+    uint16_t my_addr = bt_mesh_model_elem(srv->model)->rt->addr;
+    net_buf_simple_add_le16(&msg, my_addr);
+    net_buf_simple_add_u8(&msg, pkt->count);
+
+    for (int i = 0; i < pkt->count; i++) {
+        net_buf_simple_add_u8(&msg, pkt->entries[i].sensor_id);
+        
+        /* Clamping to avoid int16 overflow (Range: -327.67 to 327.67) */
+        float val_f = pkt->entries[i].physical;
+        if (val_f > 327.67f) val_f = 327.67f;
+        if (val_f < -327.68f) val_f = -327.68f;
+        
+        int16_t val = (int16_t)(val_f * 100);
+        net_buf_simple_add_le16(&msg, val);
+    }
+
+    struct bt_mesh_msg_ctx ctx = {
+        .app_idx = srv->model->keys[0],
+        .addr = parent->addr,
+        .send_ttl = 0,
+    };
+
+    LOG_INF("[SENSOR] Sending packet with %d sensors to parent 0x%04x", pkt->count, parent->addr);
+    return srv_send_msg_with_stat(srv, &ctx, &msg);
+}

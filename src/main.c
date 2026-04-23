@@ -12,6 +12,8 @@
 #include <bluetooth/mesh/dk_prov.h>
 #include <dk_buttons_and_leds.h>
 #include "model_handler.h"
+#include "storage.h"
+#include "sensor_manager.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(chat, CONFIG_LOG_DEFAULT_LEVEL);
@@ -58,6 +60,10 @@ int main(void)
 	int err;
 
 	printk("Initializing...\n");
+
+	/* Initialize Sensor Storage & Manager */
+	storage_init();
+	sensor_manager_init();
 
 	err = bt_enable(bt_ready);
 	if (err) {

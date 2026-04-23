@@ -16,6 +16,10 @@ target_sources(app PRIVATE
 	src/reverse_routing.c
 	src/heartbeat.c
 	src/shell_commands.c
-	src/packet_stats.c)
+	src/packet_stats.c
+	src/sensor_manager.c
+	src/storage.c
+	src/teds_tlv.c
+	src/sensor_shell.c)
 target_include_directories(app PRIVATE include)
 # NORDIC SDK APP END
