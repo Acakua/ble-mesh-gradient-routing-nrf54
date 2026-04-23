@@ -2,7 +2,7 @@
 # Kết nối: AO → P1.07 (AIN3, CH3, GPIO 39)
 # Đăng ký phần cứng: GPIO 39, ID=5, ADC channel=3
 sensor add 39 5 3
-# Nạp thông số hiệu chuẩn TEDS (dựa trên Datasheet GL5528)
+# Nạp thông số hiệu chuẩn TEDS
 sensor cal 5 3378 10 1296 100 Lux light 0 1000
 
 ## Y87Q NTC Thermistor (Cảm biến nhiệt độ)

@@ -1068,7 +1068,7 @@
                             <div style="font-size: 9px; font-weight: 700; color: var(--text-3); text-transform: uppercase; margin-bottom: 8px; letter-spacing: 1px;">
                                 🌡️ Live Sensor Data
                             </div>
-                            <div id="sensor-list-focused" style="display: flex; flex-direction: column; gap: 6px;">
+                            <div id="sensor-list-focused" style="display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; padding-right: 4px; scrollbar-width: thin; scrollbar-color: var(--primary-dim) transparent;">
                                 <div style="font-size: 11px; color: var(--text-3); font-style: italic;">No telemetry received yet</div>
                             </div>
                         </div>
@@ -1720,15 +1720,15 @@
 
         function getSensorInfo(id) {
             const catalog = {
-                1: { name: `ID: ${id}`, color: "#4488FF" },
-                2: { name: `ID: ${id}`, color: "#A0A0A0" },
-                3: { name: `ID: ${id}`, color: "#FF55FF" },
-                4: { name: `ID: ${id}`, color: "#FF4400" },
-                5: { name: `ID: ${id}`, color: "#FFD700" },
-                13: { name: `ID: ${id}`, color: "#FF4444" },
-                14: { name: `ID: ${id}`, color: "#00D4FF" }
+                1:  { name: `[ID: ${id}] RAIN`, color: "#4488FF" },
+                2:  { name: `[ID: ${id}] AIR_QLTY`, color: "#A0A0A0" },
+                3:  { name: `[ID: ${id}] CO2`, color: "#FF55FF" },
+                4:  { name: `[ID: ${id}] SMOKE`, color: "#FF4400" },
+                5:  { name: `[ID: ${id}] LIGHT`, color: "#FFD700" },
+                13: { name: `[ID: ${id}] TEMP`, color: "#FF4444" },
+                14: { name: `[ID: ${id}] HUMID`, color: "#00D4FF" }
             };
-            return catalog[id] || { name: `ID: ${id}`, color: "var(--primary)" };
+            return catalog[id] || { name: `[ID: ${id}] SENSOR`, color: "var(--primary)" };
         }
 
         function updateSensorDashboard(data) {
